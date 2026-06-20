@@ -89,10 +89,73 @@ body {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+/* Segmented View / Calibrate / Zones mode toggle. */
+.seg {
+  display: inline-flex;
+  background: #0b0e14;
+  border: 1px solid #2a3344;
+  border-radius: 8px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.seg-btn {
+  background: transparent;
+  border: 0;
+  color: #8a93a6;
+  border-radius: 6px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.seg-btn:hover {
+  color: #d7dce5;
+}
+
+.seg-btn.active {
+  background: #1e2533;
+  color: #d7dce5;
+}
+
+.evt {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: #3ad48c;
+  padding: 3px 9px;
+  background: #11151f;
+  border: 1px solid #1e2533;
+  border-radius: 6px;
+}
+
+/* Horizontal layout: canvas (flex) + optional zone panel + control panel. */
+.body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
 .canvas-wrap {
   flex: 1;
   min-height: 0;
   position: relative;
+}
+
+.side-panel {
+  width: 300px;
+  flex: 0 0 auto;
+  background: #11151f;
+  border-left: 1px solid #1e2533;
+  padding: 14px 16px;
+  overflow-y: auto;
+}
+
+.side-title {
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: #8a93a6;
+  margin-bottom: 12px;
 }
 
 .hud {
