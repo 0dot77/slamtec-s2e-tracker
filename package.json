@@ -29,5 +29,27 @@
     "electron-vite": "^2.3.0",
     "typescript": "^5.5.3",
     "vite": "^5.3.3"
+  },
+  "build": {
+    "appId": "com.0dot77.slamtec-tracker",
+    "productName": "Slamtec S2E Tracker",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "bridge/s2e_bridge",
+        "to": "bridge/s2e_bridge"
+      }
+    ],
+    "mac": {
+      "target": "dir",
+      "category": "public.app-category.utilities",
+      "identity": null
+    }
   }
 }

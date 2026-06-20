@@ -19,16 +19,49 @@ export class Bridge extends EventEmitter {
   private child?: ChildProcessWithoutNullStreams
   private buf: Buffer = Buffer.alloc(0)
 
+  // Reconnect state. `stopping` distinguishes an explicit stop()/restart from an
+  // unexpected exit (sensor unplugged, bridge crash) so only the latter triggers
+  // an automatic respawn with the last-used target.
+  private stopping = false
+  private reconnectTimer?: ReturnType<typeof setTimeout>
+  private ip = '192.168.11.2'
+  private port = 8089
+  private readonly reconnectDelayMs = 1500
+
   constructor(private readonly bridgePath: string) {
     super()
   }
 
   start(ip = '192.168.11.2', port = 8089): void {
-    this.stop()
-    this.buf = Buffer.alloc(0)
-    this.emit('status', { state: 'connecting', message: `${ip}:${port}` })
+    this.ip = ip
+    this.port = port
+    this.stopping = false
+    this.clearReconnect()
+    // Restart: kill any running child. Its exit is ignored because spawn()
+    // installs a replacement synchronously (the exit handler checks identity).
+    if (this.child) this.child.kill('SIGTERM')
+    this.spawn()
+  }
 
-    const child = spawn(this.bridgePath, [ip, String(port)])
+  stop(): void {
+    this.stopping = true
+    this.clearReconnect()
+    if (this.child) {
+      this.child.kill('SIGTERM') // exit handler emits the 'stopped' status
+    } else {
+      this.emit('status', { state: 'stopped', message: 'stopped' })
+    }
+  }
+
+  get running(): boolean {
+    return !!this.child
+  }
+
+  private spawn(): void {
+    this.buf = Buffer.alloc(0)
+    this.emit('status', { state: 'connecting', message: `${this.ip}:${this.port}` })
+
+    const child = spawn(this.bridgePath, [this.ip, String(this.port)])
     this.child = child
 
     child.stdout.on('data', (c: Buffer) => this.onData(c))
@@ -37,20 +70,34 @@ export class Bridge extends EventEmitter {
       this.emit('status', { state: 'error', message: `spawn failed: ${err.message}` })
     )
     child.on('exit', (code, signal) => {
-      if (this.child === child) this.child = undefined
-      this.emit('status', { state: 'stopped', message: `exited (${code ?? signal})` })
+      if (this.child !== child) return // superseded by a newer spawn: ignore
+      this.child = undefined
+      if (this.stopping) {
+        this.emit('status', { state: 'stopped', message: `exited (${code ?? signal})` })
+        return
+      }
+      // Unexpected exit (disconnect / crash): auto-reconnect after a short delay.
+      this.emit('status', {
+        state: 'connecting',
+        message: `connection lost (${code ?? signal}); reconnecting in ${this.reconnectDelayMs}ms…`
+      })
+      this.scheduleReconnect()
     })
   }
 
-  stop(): void {
-    if (this.child) {
-      this.child.kill('SIGTERM')
-      this.child = undefined
-    }
+  private scheduleReconnect(): void {
+    this.clearReconnect()
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined
+      if (!this.stopping) this.spawn()
+    }, this.reconnectDelayMs)
   }
 
-  get running(): boolean {
-    return !!this.child
+  private clearReconnect(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = undefined
+    }
   }
 
   private onStderr(text: string): void {
