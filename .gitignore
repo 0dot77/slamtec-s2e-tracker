@@ -1,0 +1,17 @@
+node_modules/
+out/
+dist/
+*.log
+
+# C++ bridge build artifacts
+bridge/s2e_bridge
+
+# Vendored Slamtec SDK — fetched via `npm run bridge:setup`, not committed
+bridge/third_party/
+
+.DS_Store
+
+# Local tooling / IDE metadata
+.cate/
+.omc/
+.serena/
