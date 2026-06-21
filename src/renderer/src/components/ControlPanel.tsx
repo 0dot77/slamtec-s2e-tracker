@@ -14,9 +14,11 @@ interface ControlPanelProps {
 }
 
 // Range slider descriptors. `key` indexes a numeric PipelineConfig field.
+// `ko` is a short Korean gloss of what the value actually controls.
 interface SliderSpec {
   key: keyof PipelineConfig
   label: string
+  ko: string
   min: number
   max: number
   step: number
@@ -24,15 +26,15 @@ interface SliderSpec {
 }
 
 const SLIDERS: SliderSpec[] = [
-  { key: 'bgDeltaMm', label: 'BG delta', min: 20, max: 600, step: 10, unit: 'mm' },
-  { key: 'clusterGapMm', label: 'Cluster gap', min: 20, max: 500, step: 10, unit: 'mm' },
-  { key: 'minClusterPts', label: 'Min cluster pts', min: 1, max: 30, step: 1 },
-  { key: 'minSizeMm', label: 'Min size', min: 0, max: 600, step: 10, unit: 'mm' },
-  { key: 'maxSizeMm', label: 'Max size', min: 200, max: 3000, step: 50, unit: 'mm' },
-  { key: 'trackMaxJumpMm', label: 'Track max jump', min: 50, max: 2000, step: 50, unit: 'mm' },
-  { key: 'smoothing', label: 'Smoothing', min: 0, max: 1, step: 0.05 },
-  { key: 'birthFrames', label: 'Birth frames', min: 1, max: 20, step: 1 },
-  { key: 'deathFrames', label: 'Death frames', min: 1, max: 60, step: 1 }
+  { key: 'bgDeltaMm', label: 'BG delta', ko: '배경보다 이만큼 가까우면 전경으로 인식', min: 20, max: 600, step: 10, unit: 'mm' }, // prettier-ignore
+  { key: 'clusterGapMm', label: 'Cluster gap', ko: '한 덩어리로 묶을 점 사이 최대 간격', min: 20, max: 500, step: 10, unit: 'mm' }, // prettier-ignore
+  { key: 'minClusterPts', label: 'Min cluster pts', ko: '덩어리로 인정할 최소 점 개수', min: 1, max: 30, step: 1 },
+  { key: 'minSizeMm', label: 'Min size', ko: '사람으로 볼 덩어리 최소 크기', min: 0, max: 600, step: 10, unit: 'mm' },
+  { key: 'maxSizeMm', label: 'Max size', ko: '사람으로 볼 덩어리 최대 크기', min: 200, max: 3000, step: 50, unit: 'mm' }, // prettier-ignore
+  { key: 'trackMaxJumpMm', label: 'Track max jump', ko: '한 프레임에 허용할 최대 이동 거리', min: 50, max: 2000, step: 50, unit: 'mm' }, // prettier-ignore
+  { key: 'smoothing', label: 'Smoothing', ko: '위치 보정 정도 (클수록 민첩, 작을수록 부드러움)', min: 0, max: 1, step: 0.05 }, // prettier-ignore
+  { key: 'birthFrames', label: 'Birth frames', ko: 'ID 생성까지 연속으로 잡혀야 할 프레임', min: 1, max: 20, step: 1 }, // prettier-ignore
+  { key: 'deathFrames', label: 'Death frames', ko: 'ID 삭제까지 놓쳐도 버티는 프레임', min: 1, max: 60, step: 1 } // prettier-ignore
 ]
 
 const panel: CSSProperties = {
@@ -69,6 +71,16 @@ const valueText: CSSProperties = {
   color: '#d7dce5',
   fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
   fontSize: 12
+}
+
+// Korean gloss shown under the English label.
+const koText: CSSProperties = {
+  display: 'block',
+  fontSize: 11,
+  color: '#6b7488',
+  marginTop: 1,
+  marginBottom: 4,
+  lineHeight: 1.3
 }
 
 const rangeInput: CSSProperties = {
@@ -155,6 +167,7 @@ export default function ControlPanel({
                 {s.unit ? <span style={{ color: '#5b6678' }}> {s.unit}</span> : null}
               </span>
             </span>
+            <span style={koText}>{s.ko}</span>
             <input
               type="range"
               min={s.min}
