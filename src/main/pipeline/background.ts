@@ -1,17 +1,28 @@
 // Angle-bin background subtraction.
 //
 // The LiDAR sweeps 360 degrees per revolution. We carve that sweep into
-// `binCount` angular bins and learn, per bin, the distance to the nearest
-// static surface (a rolling minimum over the learning window — robust to the
-// occasional dropped or noisy sample). At runtime a point counts as
-// foreground when it sits at least `bgDeltaMm` *closer* than its bin baseline,
-// i.e. something moved in front of the static scene.
+// `binCount` angular bins and learn, per bin, the distance to the static
+// surface as the *median* of all samples collected over the learning window.
+// The median (rather than a rolling minimum) is robust to transient objects
+// that drift into the scan plane while learning — a person who is only present
+// for a minority of frames does not poison the bin, where a minimum would bake
+// their distance in permanently and leave that bin blind. At runtime a point
+// counts as foreground when it sits at least `bgDeltaMm` *closer* than its bin
+// baseline, i.e. something moved in front of the static scene.
 //
 // Conventions (matching RawScan): angle is DEGREES, dist is MILLIMETERS, with
 // the sensor at the origin. Pure module, allocation-light, no dependencies.
 import type { FgPoints, PipelineConfig } from '../../shared/types'
 
 const DEG2RAD = Math.PI / 180
+
+/** Median of a numeric array (ascending). Returns NaN for an empty array. */
+function median(values: number[]): number {
+  if (values.length === 0) return NaN
+  const a = values.slice().sort((x, y) => x - y)
+  const mid = a.length >> 1
+  return a.length % 2 ? a[mid] : (a[mid - 1] + a[mid]) / 2
+}
 
 export class BackgroundModel {
   private readonly binCount: number
@@ -29,6 +40,13 @@ export class BackgroundModel {
   private learnSeen = 0 // frames accumulated so far in the current window
   private isLearning = false
 
+  // Per-bin distance samples collected during the active learning window, then
+  // reduced to the median baseline and freed. Empty outside of learning.
+  private samples: number[][] = []
+
+  // Bins that received a baseline at the last finalize (surfaced to the UI).
+  private learnedBins = 0
+
   // Reusable scratch buffers for subtract(), grown on demand to the largest
   // point count seen. Kept allocation-light across the per-frame hot path.
   private scAngle = new Float32Array(0)
@@ -42,13 +60,16 @@ export class BackgroundModel {
     this.baseline = new Float32Array(this.binCount).fill(NaN)
   }
 
-  /** Begin a learning window of `frames` frames (rolling per-bin min). */
+  /** Begin a learning window of `frames` frames (per-bin median baseline). */
   startLearn(frames: number): void {
     this.learnTarget = Math.max(1, frames | 0)
     this.learnSeen = 0
     this.isLearning = true
     this.hasBaseline = false
+    this.learnedBins = 0
     this.baseline.fill(NaN)
+    // Fresh, empty sample buckets for every bin.
+    this.samples = Array.from({ length: this.binCount }, () => [])
   }
 
   /**
@@ -61,12 +82,30 @@ export class BackgroundModel {
     this.learnSeen = 0
     this.isLearning = false
     this.hasBaseline = false
+    this.learnedBins = 0
     this.baseline.fill(NaN)
+    this.samples = []
   }
 
   /** True while a learning window is still accumulating frames. */
   get learning(): boolean {
     return this.isLearning
+  }
+
+  /** Learning progress in [0, 1]: fraction of the window seen, or 1 once done. */
+  get progress(): number {
+    if (this.isLearning) return this.learnTarget ? this.learnSeen / this.learnTarget : 0
+    return this.hasBaseline ? 1 : 0
+  }
+
+  /** Number of angular bins that hold a learned baseline. */
+  get coveredBins(): number {
+    return this.learnedBins
+  }
+
+  /** Total number of angular bins. */
+  get totalBins(): number {
+    return this.binCount
   }
 
   /** Map an angle in degrees to a bin index, normalized into [0, binCount). */
@@ -80,31 +119,42 @@ export class BackgroundModel {
   }
 
   /**
-   * Accumulate one frame into the learning baseline (rolling minimum per bin).
-   * No-op when not learning. Auto-finishes once the requested frame count is
-   * reached. Points with dist <= 0 are ignored.
+   * Accumulate one frame's samples into the learning window. No-op when not
+   * learning. Auto-finishes (reducing samples to per-bin medians) once the
+   * requested frame count is reached. Points with dist <= 0 are ignored.
    */
   addFrame(angle: Float32Array, dist: Float32Array, count: number): void {
     if (!this.isLearning) return
 
     const n = Math.min(count, angle.length, dist.length)
-    const baseline = this.baseline
+    const samples = this.samples
     for (let i = 0; i < n; i++) {
       const d = dist[i]
       if (d <= 0) continue
-      const bin = this.binOf(angle[i])
-      const cur = baseline[bin]
-      // Rolling min: keep the nearest static surface seen for this bin.
-      if (Number.isNaN(cur) || d < cur) {
-        baseline[bin] = d
-        this.hasBaseline = true
-      }
+      samples[this.binOf(angle[i])].push(d)
     }
 
     this.learnSeen++
-    if (this.learnSeen >= this.learnTarget) {
-      this.isLearning = false
+    if (this.learnSeen >= this.learnTarget) this.finishLearn()
+  }
+
+  /** Reduce the collected samples to a per-bin median baseline and free them. */
+  private finishLearn(): void {
+    const baseline = this.baseline
+    let learned = 0
+    for (let bin = 0; bin < this.binCount; bin++) {
+      const s = this.samples[bin]
+      if (s.length > 0) {
+        baseline[bin] = median(s)
+        learned++
+      } else {
+        baseline[bin] = NaN
+      }
     }
+    this.learnedBins = learned
+    this.hasBaseline = learned > 0
+    this.isLearning = false
+    this.samples = [] // free the per-bin buckets
   }
 
   /**
