@@ -51,6 +51,19 @@ export class BackgroundModel {
     this.baseline.fill(NaN)
   }
 
+  /**
+   * Discard the learned baseline and cancel any in-progress learning window,
+   * returning to the initial "no baseline" state where subtract() treats every
+   * valid point as foreground.
+   */
+  reset(): void {
+    this.learnTarget = 0
+    this.learnSeen = 0
+    this.isLearning = false
+    this.hasBaseline = false
+    this.baseline.fill(NaN)
+  }
+
   /** True while a learning window is still accumulating frames. */
   get learning(): boolean {
     return this.isLearning

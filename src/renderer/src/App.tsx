@@ -104,6 +104,10 @@ export default function App(): JSX.Element {
     window.api?.learnBackground()
   }, [])
 
+  const handleResetBackground = useCallback(() => {
+    window.api?.resetBackground()
+  }, [])
+
   const handleSavePreset = useCallback(() => {
     window.api?.savePreset()
   }, [])
@@ -227,6 +231,7 @@ export default function App(): JSX.Element {
           osc={osc}
           onOsc={handleOsc}
           onLearnBackground={handleLearnBackground}
+          onResetBackground={handleResetBackground}
           onSavePreset={handleSavePreset}
           onLoadPreset={handleLoadPreset}
           status={

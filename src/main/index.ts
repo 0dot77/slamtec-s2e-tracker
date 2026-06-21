@@ -237,6 +237,14 @@ app.whenReady().then(() => {
     zoneEval.reset()
     return true
   })
+  ipcMain.handle(IPC.resetBackground, () => {
+    background.reset()
+    // Dropping the baseline turns the whole scene back into foreground, so the
+    // tracks/occupancy built against the old baseline no longer apply.
+    tracker.reset()
+    zoneEval.reset()
+    return true
+  })
 
   // --- Calibration ---------------------------------------------------------
   ipcMain.handle(IPC.setCalibration, (_e, p: CalibrationPoints | null) => {

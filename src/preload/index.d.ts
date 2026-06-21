@@ -21,6 +21,7 @@ declare global {
       stop: () => Promise<boolean>
       setPipelineConfig: (cfg: PipelineConfig) => Promise<boolean>
       learnBackground: () => Promise<boolean>
+      resetBackground: () => Promise<boolean>
       setCalibration: (p: CalibrationPoints | null) => Promise<boolean>
       setZones: (z: Zone[]) => Promise<boolean>
       setOscConfig: (cfg: OscConfig) => Promise<boolean>

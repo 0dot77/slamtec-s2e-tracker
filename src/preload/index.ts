@@ -38,6 +38,7 @@ const api = {
   setPipelineConfig: (cfg: PipelineConfig): Promise<boolean> =>
     ipcRenderer.invoke(IPC.setPipelineConfig, cfg),
   learnBackground: (): Promise<boolean> => ipcRenderer.invoke(IPC.learnBackground),
+  resetBackground: (): Promise<boolean> => ipcRenderer.invoke(IPC.resetBackground),
   setCalibration: (p: CalibrationPoints | null): Promise<boolean> =>
     ipcRenderer.invoke(IPC.setCalibration, p),
   setZones: (z: Zone[]): Promise<boolean> => ipcRenderer.invoke(IPC.setZones, z),

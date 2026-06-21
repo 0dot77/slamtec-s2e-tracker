@@ -7,6 +7,7 @@ interface ControlPanelProps {
   osc: OscConfig
   onOsc: (c: OscConfig) => void
   onLearnBackground: () => void
+  onResetBackground: () => void
   onSavePreset: () => void
   onLoadPreset: () => void
   status?: string
@@ -130,6 +131,7 @@ export default function ControlPanel({
   osc,
   onOsc,
   onLearnBackground,
+  onResetBackground,
   onSavePreset,
   onLoadPreset,
   status
@@ -166,9 +168,23 @@ export default function ControlPanel({
         )
       })}
 
-      <button type="button" style={ghostButton} onClick={onLearnBackground}>
-        Learn background
-      </button>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button
+          type="button"
+          style={{ ...ghostButton, flex: 1 }}
+          onClick={onLearnBackground}
+        >
+          Learn background
+        </button>
+        <button
+          type="button"
+          style={ghostButton}
+          onClick={onResetBackground}
+          title="Discard the learned background; the whole scene becomes foreground again"
+        >
+          Reset
+        </button>
+      </div>
 
       <hr style={divider} />
       <div style={sectionTitle}>OSC</div>

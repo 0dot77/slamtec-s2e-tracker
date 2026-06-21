@@ -7,6 +7,7 @@ export const IPC = {
   bridgeStop: 'bridge:stop',
   setPipelineConfig: 'cfg:pipeline',
   learnBackground: 'cfg:learn-bg',
+  resetBackground: 'cfg:reset-bg',
   setCalibration: 'cfg:calibration',
   setZones: 'cfg:zones',
   setOscConfig: 'cfg:osc',
