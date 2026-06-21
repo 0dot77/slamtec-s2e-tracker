@@ -197,7 +197,13 @@ function startBridge(cfg?: BridgeConfig): void {
       quality: scan.quality,
       fg: fgXY,
       tracks,
-      zones: runtime
+      zones: runtime,
+      bg: {
+        learning: background.learning,
+        progress: background.progress,
+        bins: background.coveredBins,
+        totalBins: background.totalBins
+      }
     }
     if (scan.seq % 30 === 0) {
       console.log(

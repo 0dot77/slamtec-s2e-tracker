@@ -234,6 +234,7 @@ export default function App(): JSX.Element {
           onResetBackground={handleResetBackground}
           onSavePreset={handleSavePreset}
           onLoadPreset={handleLoadPreset}
+          bg={frame?.bg}
           status={
             mode === 'calibrate'
               ? 'Drag the 4 amber handles to map the floor.'

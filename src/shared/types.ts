@@ -3,6 +3,15 @@
 //   x, y  -> LiDAR space in millimeters, sensor at the origin.
 //   u, v  -> normalized [0, 1] space (homography output), invariant to sensor placement.
 
+// Background-learning status, surfaced per frame so the UI can show whether a
+// baseline exists, learning progress, and how much of the sweep is covered.
+export interface BgStatus {
+  learning: boolean
+  progress: number // 0..1
+  bins: number // angular bins with a learned baseline
+  totalBins: number
+}
+
 // Visualization frame pushed from main -> renderer over IPC.
 // `xy` is interleaved [x0, y0, x1, y1, ...] in millimeters with the LiDAR at the origin.
 // `fg` is interleaved foreground xy [x0, y0, x1, y1, ...] in millimeters.
@@ -15,6 +24,7 @@ export interface VizFrame {
   fg?: Float32Array
   tracks: Track[]
   zones: ZoneRuntime[]
+  bg: BgStatus
 }
 
 export type BridgeState =

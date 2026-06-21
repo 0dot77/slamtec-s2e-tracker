@@ -1,5 +1,8 @@
-import type { CSSProperties } from 'react'
-import type { OscConfig, PipelineConfig } from '@shared/types'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import type { BgStatus, OscConfig, PipelineConfig } from '@shared/types'
+
+// Seconds counted down (with the area cleared) before a learn window starts.
+const LEARN_COUNTDOWN = 3
 
 interface ControlPanelProps {
   config: PipelineConfig
@@ -10,6 +13,7 @@ interface ControlPanelProps {
   onResetBackground: () => void
   onSavePreset: () => void
   onLoadPreset: () => void
+  bg?: BgStatus
   status?: string
 }
 
@@ -71,6 +75,14 @@ const valueText: CSSProperties = {
   color: '#d7dce5',
   fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
   fontSize: 12
+}
+
+// Background-model status line under the learn/reset controls.
+const bgStatusText: CSSProperties = {
+  fontSize: 11,
+  color: '#8a93a6',
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+  marginTop: -6
 }
 
 // Korean gloss shown under the English label.
@@ -146,11 +158,45 @@ export default function ControlPanel({
   onResetBackground,
   onSavePreset,
   onLoadPreset,
+  bg,
   status
 }: ControlPanelProps): JSX.Element {
   const setField = (key: keyof PipelineConfig, value: number): void => {
     onConfig({ ...config, [key]: value })
   }
+
+  // Countdown before learning, so the user can step out of the scan plane.
+  // null = idle; otherwise the seconds remaining before learn fires.
+  const [countdown, setCountdown] = useState<number | null>(null)
+  const timer = useRef<ReturnType<typeof setTimeout>>()
+  useEffect(() => () => clearTimeout(timer.current), [])
+
+  const startLearnCountdown = (): void => {
+    if (countdown !== null) return // already counting down
+    let n = LEARN_COUNTDOWN
+    setCountdown(n)
+    const tick = (): void => {
+      n -= 1
+      if (n > 0) {
+        setCountdown(n)
+        timer.current = setTimeout(tick, 1000)
+      } else {
+        setCountdown(null)
+        onLearnBackground()
+      }
+    }
+    timer.current = setTimeout(tick, 1000)
+  }
+
+  // One-line status of the background model, shown under the learn controls.
+  const counting = countdown !== null
+  const bgText = counting
+    ? `영역에서 비켜주세요 — ${countdown}초 후 학습`
+    : bg?.learning
+      ? `배경 학습 중… ${Math.round(bg.progress * 100)}%`
+      : bg && bg.bins > 0
+        ? `배경 학습됨 · ${bg.bins}/${bg.totalBins} bins`
+        : '배경 미학습 (전체가 전경)'
 
   return (
     <aside style={panel}>
@@ -184,20 +230,24 @@ export default function ControlPanel({
       <div style={{ display: 'flex', gap: 8 }}>
         <button
           type="button"
-          style={{ ...ghostButton, flex: 1 }}
-          onClick={onLearnBackground}
+          style={{ ...ghostButton, flex: 1, opacity: counting ? 0.6 : 1 }}
+          onClick={startLearnCountdown}
+          disabled={counting}
+          title="Step out of the area; after a short countdown the static scene is learned"
         >
-          Learn background
+          {counting ? `학습까지 ${countdown}…` : 'Learn background'}
         </button>
         <button
           type="button"
           style={ghostButton}
           onClick={onResetBackground}
+          disabled={counting}
           title="Discard the learned background; the whole scene becomes foreground again"
         >
           Reset
         </button>
       </div>
+      <div style={bgStatusText}>{bgText}</div>
 
       <hr style={divider} />
       <div style={sectionTitle}>OSC</div>
