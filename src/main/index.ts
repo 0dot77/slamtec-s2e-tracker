@@ -98,10 +98,22 @@ function createWindow(): void {
       startBridge()
     }
   })
+
+  // Drop the reference once the window is gone so the optional chaining in
+  // send() actually short-circuits. Without this, win stays truthy after the
+  // window is closed and per-frame IPC keeps targeting a destroyed webContents.
+  win.on('closed', () => {
+    win = null
+  })
 }
 
+// Guarded IPC push to the renderer. The bridge can emit an in-flight scan frame
+// while the window is mid-teardown (close -> destroyed -> 'closed'), and sending
+// to a destroyed webContents throws "Object has been destroyed", surfacing as a
+// main-process error dialog on quit. Skip the send when the target is gone.
 function send(channel: string, payload: unknown): void {
-  win?.webContents.send(channel, payload)
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return
+  win.webContents.send(channel, payload)
 }
 
 function startBridge(cfg?: BridgeConfig): void {
