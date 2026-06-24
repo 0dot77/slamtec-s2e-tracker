@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import type { CalibrationPoints, Track, VizFrame } from '@shared/types'
+import type { CalibrationPoints, Track, VizFrame, Zone, ZoneRuntime } from '@shared/types'
+import { applyHomography, type Mat3 } from '@shared/homography'
+import { hexToRgba } from '../lib/zones'
 
 export interface View {
   scale: number // pixels per millimeter (device px)
@@ -20,14 +22,30 @@ interface Props {
   // Notified whenever the view transform changes (mount, resize, wheel, drag) so
   // the parent can keep overlays (CalibrationLayer) aligned with pan/zoom.
   onView?: (v: View) => void
+  // Event zones (normalized polygons) drawn warped onto the floor, plus the
+  // inverse homography (normalized -> LiDAR mm) needed to place them. Runtime
+  // adds the live active/occupant state for highlighting.
+  zones?: Zone[]
+  runtime?: ZoneRuntime[]
+  homographyInv?: Mat3 | null
 }
 
 const TRACK_COLORS = ['#3ad48c', '#37a0d4', '#e0b341', '#ff5d5d', '#a079e0', '#37d4c8', '#e07ab4']
 
-export default function LidarCanvas({ frame, calibration, onView }: Props): JSX.Element {
+export default function LidarCanvas({
+  frame,
+  calibration,
+  onView,
+  zones,
+  runtime,
+  homographyInv
+}: Props): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const frameRef = useRef<VizFrame | null>(frame)
   const calibRef = useRef<CalibrationPoints | null>(calibration ?? null)
+  const zonesRef = useRef<Zone[]>(zones ?? [])
+  const runtimeRef = useRef<ZoneRuntime[]>(runtime ?? [])
+  const homInvRef = useRef<Mat3 | null>(homographyInv ?? null)
   const onViewRef = useRef(onView)
   const viewRef = useRef<View>({ scale: 0.08, ox: 0, oy: 0, dpr: 1, cssW: 0, cssH: 0 })
   const initedRef = useRef(false)
@@ -40,6 +58,9 @@ export default function LidarCanvas({ frame, calibration, onView }: Props): JSX.
 
   frameRef.current = frame
   calibRef.current = calibration ?? null
+  zonesRef.current = zones ?? []
+  runtimeRef.current = runtime ?? []
+  homInvRef.current = homographyInv ?? null
   onViewRef.current = onView
 
   // HUD counters + FPS estimate, recomputed when a new frame arrives.
@@ -157,6 +178,57 @@ export default function LidarCanvas({ frame, calibration, onView }: Props): JSX.
           for (let i = 0; i < fgCount; i++) {
             ctx.fillRect(sx(fgxy[i * 2]) - szFg / 2, sy(fgxy[i * 2 + 1]) - szFg / 2, szFg, szFg)
           }
+        }
+      }
+
+      // Event zones, warped from normalized space onto the floor via the
+      // inverse homography. Drawn over the cloud but under the tracks.
+      const hInv = homInvRef.current
+      const zoneList = zonesRef.current
+      if (hInv && zoneList.length > 0) {
+        const rtById = new Map<string, ZoneRuntime>()
+        for (const r of runtimeRef.current) rtById.set(r.id, r)
+        ctx.font = `${11 * d}px ui-monospace, monospace`
+        for (const zone of zoneList) {
+          if (zone.polygon.length < 2) continue
+          const pts = zone.polygon.map(([u, vv]) => {
+            const [mx, my] = applyHomography(hInv, u, vv)
+            return [sx(mx), sy(my)] as [number, number]
+          })
+          const r = rtById.get(zone.id)
+          const active = r?.active ?? false
+          const dim = !zone.enabled
+
+          ctx.beginPath()
+          ctx.moveTo(pts[0][0], pts[0][1])
+          for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1])
+          ctx.closePath()
+          ctx.fillStyle = hexToRgba(zone.color, active ? 0.3 : dim ? 0.04 : 0.12)
+          ctx.fill()
+          ctx.lineWidth = (active ? 2 : 1.25) * d
+          ctx.strokeStyle = dim ? hexToRgba(zone.color, 0.4) : zone.color
+          ctx.stroke()
+
+          // Centroid label: name + live occupant count.
+          let cx = 0
+          let cy = 0
+          for (const [px, py] of pts) {
+            cx += px
+            cy += py
+          }
+          cx /= pts.length
+          cy /= pts.length
+          const occ = r?.occupants.length ?? 0
+          const label = `${zone.name} · ${occ}`
+          const tw = ctx.measureText(label).width
+          ctx.fillStyle = 'rgba(11,14,20,0.7)'
+          ctx.fillRect(cx - tw / 2 - 4 * d, cy - 8 * d, tw + 8 * d, 16 * d)
+          ctx.fillStyle = dim ? '#8a93a6' : '#d7dce5'
+          ctx.textAlign = 'center'
+          ctx.textBaseline = 'middle'
+          ctx.fillText(label, cx, cy)
+          ctx.textAlign = 'left'
+          ctx.textBaseline = 'alphabetic'
         }
       }
 

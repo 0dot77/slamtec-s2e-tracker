@@ -12,7 +12,7 @@
 //   - Forward map: src LiDAR-mm (x, y) -> normalized (u, v) in [0, 1].
 //   - No external dependencies; all linear algebra is hand-rolled.
 
-import type { CalibrationPoints } from '../../shared/types'
+import type { CalibrationPoints } from './types'
 
 export type Mat3 = number[]
 

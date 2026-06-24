@@ -1,18 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   BridgeStatus,
   CalibrationPoints,
   OscConfig,
   PipelineConfig,
-  Track,
   VizFrame,
   Zone,
   ZoneEvent,
   ZoneRuntime
 } from '@shared/types'
 import { DEFAULT_OSC_CONFIG, DEFAULT_PIPELINE_CONFIG } from '@shared/types'
+import { applyHomography, computeHomography, invertMat3 } from '@shared/homography'
 import LidarCanvas, { type View } from './components/LidarCanvas'
 import CalibrationLayer from './components/CalibrationLayer'
+import ZoneOverlay from './components/ZoneOverlay'
 import ZoneEditor from './components/ZoneEditor'
 import ControlPanel from './components/ControlPanel'
 
@@ -36,7 +37,6 @@ export default function App(): JSX.Element {
 
   // Per-frame data (latest VizFrame, split for the consumers that need it).
   const [frame, setFrame] = useState<VizFrame | null>(null)
-  const [tracks, setTracks] = useState<Track[]>([])
   const [runtime, setRuntime] = useState<ZoneRuntime[]>([])
 
   // Authoring / config state (source of truth in the renderer, mirrored to main).
@@ -55,7 +55,6 @@ export default function App(): JSX.Element {
     const offStatus = window.api?.onStatus(setStatus)
     const offFrame = window.api?.onFrame((f) => {
       setFrame(f)
-      setTracks(f.tracks)
       setRuntime(f.zones)
     })
     const offZone = window.api?.onZoneEvent((e: ZoneEvent) => {
@@ -149,6 +148,33 @@ export default function App(): JSX.Element {
     [view]
   )
 
+  // Homography mapping LiDAR mm -> normalized [0,1] (and its inverse). Recomputed
+  // only when calibration changes; null until the floor is calibrated.
+  const homography = useMemo(
+    () => (calibration ? computeHomography(calibration.src) : null),
+    [calibration]
+  )
+  const homographyInv = useMemo(() => (homography ? invertMat3(homography) : null), [homography])
+
+  // Bridge normalized zone space and CSS px through the current pan/zoom + calib.
+  // Both return null when there is no calibration to anchor the unit square.
+  const normToScreen = useCallback(
+    (u: number, v: number): [number, number] | null => {
+      if (!homographyInv) return null
+      const [x, y] = applyHomography(homographyInv, u, v)
+      return toScreen(x, y)
+    },
+    [homographyInv, toScreen]
+  )
+  const screenToNorm = useCallback(
+    (px: number, py: number): [number, number] | null => {
+      if (!homography) return null
+      const [x, y] = toWorld(px, py)
+      return applyHomography(homography, x, y)
+    },
+    [homography, toWorld]
+  )
+
   return (
     <div className="app">
       <header className="topbar">
@@ -200,6 +226,9 @@ export default function App(): JSX.Element {
             frame={frame}
             calibration={calibration}
             onView={setView}
+            zones={zones}
+            runtime={runtime}
+            homographyInv={homographyInv}
           />
           {mode === 'calibrate' && view && (
             <CalibrationLayer
@@ -211,17 +240,24 @@ export default function App(): JSX.Element {
               height={view.cssH}
             />
           )}
+          {mode === 'zones' && view && (
+            <ZoneOverlay
+              width={view.cssW}
+              height={view.cssH}
+              zones={zones}
+              runtime={runtime}
+              calibrated={!!calibration}
+              normToScreen={normToScreen}
+              screenToNorm={screenToNorm}
+              onChange={handleZones}
+            />
+          )}
         </div>
 
         {mode === 'zones' && (
           <div className="side-panel">
             <div className="side-title">Event Zones</div>
-            <ZoneEditor
-              zones={zones}
-              tracks={tracks}
-              runtime={runtime}
-              onChange={handleZones}
-            />
+            <ZoneEditor zones={zones} runtime={runtime} onChange={handleZones} />
           </div>
         )}
 

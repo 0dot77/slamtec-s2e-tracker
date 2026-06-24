@@ -45,6 +45,13 @@ int main(int argc, const char **argv) {
     const char *ip   = (argc > 1) ? argv[1] : "192.168.11.2";
     int         port = (argc > 2) ? atoi(argv[2]) : 8089;
 
+    // Ignore SIGPIPE BEFORE any socket I/O. The SDK's connect()/getDeviceInfo()
+    // can write to a socket whose peer has gone away (EPIPE); with the default
+    // disposition that signal kills us mid-handshake and the parent only ever
+    // sees a SIGPIPE exit + endless reconnect. Ignoring it lets those writes
+    // fail as -1/EPIPE so the SDK (and our fwrite check below) handle it.
+    signal(SIGPIPE, SIG_IGN);
+
     // stderr unbuffered so connection logs appear immediately; stdout carries
     // binary frames that we flush explicitly after each scan.
     setvbuf(stderr, nullptr, _IONBF, 0);
@@ -81,9 +88,11 @@ int main(int argc, const char **argv) {
         }
     }
 
+    // Install stop handlers only now: during the blocking connect/handshake we
+    // want the default SIGTERM disposition (immediate exit) so a restart can
+    // kill a hung child. SIGPIPE is already ignored from the top of main().
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
-    signal(SIGPIPE, SIG_IGN); // detect a closed stdout via fwrite failure instead of dying
 
     drv->startScan(0, 1); // force=0, useTypicalScan=1
     fprintf(stderr, "[bridge] scanning\n");
