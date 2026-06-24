@@ -1,0 +1,140 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build, for example v0.1.0'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build S2E bridge
+        run: npm run bridge:setup
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Package macOS app
+        run: npm run dist:mac
+
+      - name: Zip macOS app
+        run: |
+          APP_DIR="$(find dist -maxdepth 2 -name 'Slamtec S2E Tracker.app' -type d | head -n 1)"
+          if [ -z "$APP_DIR" ]; then
+            echo "macOS app bundle was not created" >&2
+            exit 1
+          fi
+          ARCH_DIR="$(basename "$(dirname "$APP_DIR")")"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "dist/Slamtec-S2E-Tracker-${ARCH_DIR}.zip"
+
+      - name: Upload macOS release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-release-asset
+          path: dist/Slamtec-S2E-Tracker-mac-*.zip
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build S2E bridge
+        run: npm run bridge:setup
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Package Windows x64 app
+        run: npm run dist:win
+
+      - name: Upload Windows release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-assets
+          path: |
+            dist/*.zip
+            dist/*.exe
+          if-no-files-found: error
+
+  release:
+    runs-on: ubuntu-latest
+    needs:
+      - macos
+      - windows
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Create or update GitHub release
+        run: |
+          cat > release-notes.md <<'NOTES'
+          ## Slamtec S2E Tracker
+
+          Desktop tracker for Slamtec RPLIDAR S2E with calibration, event zones, and OSC output for TouchDesigner.
+
+          ### Downloads
+
+          - macOS: download `Slamtec-S2E-Tracker-mac-*.zip`
+          - Windows x64: download the Windows `.zip` or portable `.exe`
+
+          The builds are unsigned. On macOS or Windows, the OS may show the usual warning for unsigned apps.
+          NOTES
+
+          mapfile -t ASSETS < <(find release-assets -type f | sort)
+          if [ "${#ASSETS[@]}" -eq 0 ]; then
+            echo "No release assets found" >&2
+            exit 1
+          fi
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${ASSETS[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${ASSETS[@]}" \
+              --title "$RELEASE_TAG" \
+              --notes-file release-notes.md
+          fi

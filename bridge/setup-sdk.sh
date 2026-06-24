@@ -18,4 +18,4 @@ make -C "$SDK_DIR"
 echo "==> Building s2e_bridge"
 make -C "$HERE"
 
-echo "==> Done: $HERE/s2e_bridge"
+echo "==> Done: $HERE/bin/s2e_bridge"

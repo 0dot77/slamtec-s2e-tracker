@@ -6,13 +6,14 @@
   "author": "",
   "license": "MIT",
   "scripts": {
-    "bridge": "make -C bridge",
-    "bridge:setup": "bash bridge/setup-sdk.sh",
+    "bridge": "node scripts/build-bridge.mjs",
+    "bridge:setup": "node scripts/setup-bridge.mjs",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json --composite false && tsc --noEmit -p tsconfig.web.json --composite false",
-    "dist:mac": "electron-vite build && electron-builder --mac"
+    "dist:mac": "npm run bridge && electron-vite build && electron-builder --mac",
+    "dist:win": "npm run bridge && electron-vite build && electron-builder --win --x64"
   },
   "dependencies": {
     "osc": "^2.4.5",
@@ -42,14 +43,34 @@
     ],
     "extraResources": [
       {
-        "from": "bridge/s2e_bridge",
-        "to": "bridge/s2e_bridge"
+        "from": "bridge/bin",
+        "to": "bridge",
+        "filter": [
+          "s2e_bridge",
+          "s2e_bridge.exe"
+        ]
       }
     ],
     "mac": {
       "target": "dir",
       "category": "public.app-category.utilities",
       "identity": null
+    },
+    "win": {
+      "target": [
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
     }
   }
 }

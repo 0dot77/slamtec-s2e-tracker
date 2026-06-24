@@ -5,6 +5,9 @@ dist/
 
 # C++ bridge build artifacts
 bridge/s2e_bridge
+bridge/s2e_bridge.exe
+bridge/bin/
+bridge/obj/
 
 # Vendored Slamtec SDK — fetched via `npm run bridge:setup`, not committed
 bridge/third_party/

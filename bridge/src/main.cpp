@@ -26,6 +26,11 @@
 #include <csignal>
 #include <chrono>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 #include "sl_lidar.h"
 #include "sl_lidar_driver.h"
 
@@ -45,12 +50,18 @@ int main(int argc, const char **argv) {
     const char *ip   = (argc > 1) ? argv[1] : "192.168.11.2";
     int         port = (argc > 2) ? atoi(argv[2]) : 8089;
 
+#ifdef _WIN32
+    // stdout carries binary frames. Windows defaults stdout to text mode, which
+    // can rewrite byte sequences and corrupt the parent parser's frame stream.
+    _setmode(_fileno(stdout), _O_BINARY);
+#else
     // Ignore SIGPIPE BEFORE any socket I/O. The SDK's connect()/getDeviceInfo()
     // can write to a socket whose peer has gone away (EPIPE); with the default
     // disposition that signal kills us mid-handshake and the parent only ever
     // sees a SIGPIPE exit + endless reconnect. Ignoring it lets those writes
     // fail as -1/EPIPE so the SDK (and our fwrite check below) handle it.
     signal(SIGPIPE, SIG_IGN);
+#endif
 
     // stderr unbuffered so connection logs appear immediately; stdout carries
     // binary frames that we flush explicitly after each scan.
@@ -90,7 +101,8 @@ int main(int argc, const char **argv) {
 
     // Install stop handlers only now: during the blocking connect/handshake we
     // want the default SIGTERM disposition (immediate exit) so a restart can
-    // kill a hung child. SIGPIPE is already ignored from the top of main().
+    // kill a hung child. On POSIX, SIGPIPE is already ignored from the top of
+    // main().
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 

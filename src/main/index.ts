@@ -21,14 +21,15 @@ import {
   type Preset
 } from '../shared/types'
 
-// Path to the compiled C++ bridge. In dev, cwd is the project root; in a
-// packaged .app the binary is bundled via electron-builder extraResources at
-// Contents/Resources/bridge/s2e_bridge. An env override wins for either.
+// Path to the compiled C++ bridge. In dev, cwd is the project root and
+// `npm run bridge` writes bridge/bin/s2e_bridge(.exe). Packaged apps bundle the
+// current platform binary under resources/bridge/. An env override wins.
+const BRIDGE_EXE = process.platform === 'win32' ? 's2e_bridge.exe' : 's2e_bridge'
 const BRIDGE_PATH =
   process.env.S2E_BRIDGE_PATH ||
   (app.isPackaged
-    ? join(process.resourcesPath, 'bridge', 's2e_bridge')
-    : resolve(process.cwd(), 'bridge/s2e_bridge'))
+    ? join(process.resourcesPath, 'bridge', BRIDGE_EXE)
+    : resolve(process.cwd(), 'bridge', 'bin', BRIDGE_EXE))
 
 let win: BrowserWindow | null = null
 let bridge: Bridge | null = null

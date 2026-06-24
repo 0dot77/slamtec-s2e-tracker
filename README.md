@@ -15,11 +15,16 @@ Slamtec RPLIDAR **S2E**로 사람의 위치를 실시간 추적하고, 정규화
 ## 지원 환경
 
 - macOS
+- Windows x64
 - Node.js 20 이상 권장
-- Xcode Command Line Tools 또는 `make`/C++ 빌드 도구
 - Slamtec RPLIDAR S2E
 - S2E용 12V 전원 어댑터
-- Mac과 S2E를 연결할 Ethernet 또는 USB-LAN 어댑터
+- 컴퓨터와 S2E를 연결할 Ethernet 또는 USB-LAN 어댑터
+
+플랫폼별 빌드 도구:
+
+- macOS: Xcode Command Line Tools 또는 `make`/C++ compiler
+- Windows x64: Visual Studio 2022 Build Tools, **Desktop development with C++** workload, Git
 
 Slamtec SDK는 저장소에 포함하지 않습니다. `npm run bridge:setup`이 공식 SDK를 `bridge/third_party/` 아래로 내려받고 로컬에서 빌드합니다.
 
@@ -40,8 +45,10 @@ npm run dev
 S2E 기본 주소는 `192.168.11.2:8089`입니다. 앱도 이 값을 기본값으로 사용합니다.
 
 1. S2E에 12V 전원을 연결합니다.
-2. S2E Ethernet을 Mac의 Ethernet/USB-LAN 어댑터에 연결합니다.
-3. Mac의 해당 네트워크 인터페이스를 수동 IP로 설정합니다.
+2. S2E Ethernet을 컴퓨터의 Ethernet/USB-LAN 어댑터에 연결합니다.
+3. 해당 네트워크 인터페이스를 수동 IP로 설정합니다.
+
+macOS:
 
 ```bash
 networksetup -setmanual "USB 10/100/1000 LAN" 192.168.11.100 255.255.255.0
@@ -53,10 +60,27 @@ networksetup -setmanual "USB 10/100/1000 LAN" 192.168.11.100 255.255.255.0
 networksetup -listallnetworkservices
 ```
 
+Windows:
+
+```powershell
+Get-NetAdapter
+New-NetIPAddress -InterfaceAlias "Ethernet" -IPAddress 192.168.11.100 -PrefixLength 24
+```
+
+이미 같은 인터페이스에 IP가 잡혀 있다면 Windows 설정 앱에서 IPv4를 수동으로 바꿔도 됩니다.
+
 S2E는 ICMP ping에 응답하지 않을 수 있습니다. `ping 192.168.11.2` 실패만으로 연결 실패라고 판단하지 말고 ARP를 확인하세요.
+
+macOS:
 
 ```bash
 arp -an | grep 192.168.11.2
+```
+
+Windows:
+
+```powershell
+arp -a | findstr 192.168.11.2
 ```
 
 MAC 주소가 보이면 물리 연결과 IP 대역 설정은 대체로 정상입니다.
@@ -109,6 +133,7 @@ npm run build        # main/preload/renderer 번들 빌드
 npm run typecheck    # TypeScript 검사
 npm run bridge       # C++ bridge만 다시 빌드
 npm run dist:mac     # unsigned macOS .app 생성
+npm run dist:win     # unsigned Windows x64 zip/portable 생성
 ```
 
 이 저장소에는 별도 test runner나 linter가 없습니다. TypeScript 변경 후에는 최소한 `npm run typecheck`를 실행하세요.
@@ -133,12 +158,21 @@ S2E -> C++ bridge -> Electron main -> pipeline -> OSC
 
 ## Bridge 경로
 
-개발 모드에서는 기본적으로 `bridge/s2e_bridge`를 실행합니다. 패키징된 앱에서는 `resources/bridge/s2e_bridge`를 사용합니다.
+개발 모드에서는 기본적으로 `bridge/bin/s2e_bridge`를 실행합니다. Windows에서는 `bridge/bin/s2e_bridge.exe`를 실행합니다. 패키징된 앱에서는 같은 파일명이 `resources/bridge/` 아래에 들어갑니다.
 
 다른 bridge binary를 테스트하려면 환경 변수를 지정하세요.
 
+macOS:
+
 ```bash
 S2E_BRIDGE_PATH=/absolute/path/to/s2e_bridge npm run dev
+```
+
+Windows PowerShell:
+
+```powershell
+$env:S2E_BRIDGE_PATH="C:\absolute\path\to\s2e_bridge.exe"
+npm run dev
 ```
 
 ## 문제 해결
@@ -146,14 +180,16 @@ S2E_BRIDGE_PATH=/absolute/path/to/s2e_bridge npm run dev
 **Point cloud가 보이지 않음**
 
 - S2E 전원이 켜져 있는지 확인합니다.
-- Mac Ethernet IP가 `192.168.11.x/24` 대역인지 확인합니다.
-- `arp -an | grep 192.168.11.2`로 장비가 보이는지 확인합니다.
-- 방화벽 또는 다른 네트워크 인터페이스가 UDP 수신을 막고 있지 않은지 확인합니다.
+- Ethernet IP가 `192.168.11.x/24` 대역인지 확인합니다.
+- ARP로 `192.168.11.2` 장비가 보이는지 확인합니다.
+- Windows에서는 방화벽에서 앱 또는 `s2e_bridge.exe`의 네트워크 접근이 막히지 않았는지 확인합니다.
+- 다른 네트워크 인터페이스가 같은 대역을 잡고 있지 않은지 확인합니다.
 
 **`npm run bridge:setup`이 실패함**
 
-- Xcode Command Line Tools가 설치되어 있는지 확인합니다.
-- `git`, `make`, C++ compiler가 PATH에 있는지 확인합니다.
+- macOS는 Xcode Command Line Tools가 설치되어 있는지 확인합니다.
+- Windows는 Visual Studio 2022 Build Tools와 Desktop development with C++ workload가 설치되어 있는지 확인합니다.
+- `git`, 빌드 도구, C++ compiler가 PATH에서 접근 가능한지 확인합니다.
 - 네트워크에서 GitHub 접근이 가능한지 확인합니다.
 
 **트랙 ID가 흔들리거나 사람이 여러 개로 쪼개짐**
@@ -164,7 +200,7 @@ S2E_BRIDGE_PATH=/absolute/path/to/s2e_bridge npm run dev
 **TouchDesigner에서 OSC가 안 들어옴**
 
 - TouchDesigner OSC In 포트가 앱의 OSC 포트와 같은지 확인합니다.
-- 같은 Mac이면 host는 `127.0.0.1`을 사용합니다.
+- 같은 컴퓨터이면 host는 `127.0.0.1`을 사용합니다.
 - 다른 컴퓨터로 보내려면 host를 수신 컴퓨터의 IP로 바꾸고 방화벽을 확인합니다.
 
 ## 라이선스
