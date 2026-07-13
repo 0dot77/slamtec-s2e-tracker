@@ -2,6 +2,7 @@ node_modules/
 out/
 dist/
 *.log
+*.tsbuildinfo
 
 # C++ bridge build artifacts
 bridge/s2e_bridge
