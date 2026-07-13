@@ -80,7 +80,9 @@ int main(int argc, const char **argv) {
 
     sl_lidar_response_device_info_t info;
     if (SL_IS_FAIL(drv->getDeviceInfo(info))) {
-        fprintf(stderr, "[bridge] getDeviceInfo failed\n");
+        // UDP connect() succeeds even with no device present; this is the first
+        // real request/response, so a failure here means nothing is answering.
+        fprintf(stderr, "[bridge] getDeviceInfo failed - no response from %s:%d (check adapter IP 192.168.11.100/24 and link: arp -an)\n", ip, port);
         delete drv;
         return 4;
     }
