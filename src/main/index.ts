@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain, shell } from 'electron'
 import { join, resolve } from 'path'
 import { Bridge, type RawScan } from './bridge'
 import { BackgroundModel } from './pipeline/background'
@@ -8,6 +8,8 @@ import { ZoneEvaluator } from './pipeline/zones'
 import { computeHomography, applyHomography, type Mat3 } from '../shared/homography'
 import { OscSender } from './osc'
 import { savePreset, loadPreset } from './presets'
+import { loadSettings, saveSettings } from './settings'
+import { diagnose, probeDevice, configure } from './network'
 import { IPC } from '../shared/ipc'
 import {
   DEFAULT_PIPELINE_CONFIG,
@@ -18,7 +20,8 @@ import {
   type OscConfig,
   type CalibrationPoints,
   type Zone,
-  type Preset
+  type Preset,
+  type NetworkConfigureRequest
 } from '../shared/types'
 
 // Path to the compiled C++ bridge. In dev, cwd is the project root and
@@ -34,6 +37,12 @@ const BRIDGE_PATH =
 let win: BrowserWindow | null = null
 let bridge: Bridge | null = null
 let autoStarted = false
+
+// Effective connection resolved on the last startBridge, reused by the exit hook
+// (re-diagnosis) and the on-connect settings persistence.
+let lastConfig: { ip: string; port: number } = { ip: '192.168.11.2', port: 8089 }
+// Guard so the last-used connection is persisted once per config, not per frame.
+let savedFor = ''
 
 const DEG2RAD = Math.PI / 180
 
@@ -96,8 +105,16 @@ function createWindow(): void {
   win.webContents.on('did-finish-load', () => {
     if (!autoStarted) {
       autoStarted = true
-      startBridge()
+      startBridge(loadSettings().connection)
     }
+  })
+
+  // window.open from the renderer never creates a child window; external
+  // targets (e.g. the System Settings network-pane deep link in the network
+  // fix panel) are handed to the OS instead.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^(https?|x-apple\.systempreferences):/.test(url)) shell.openExternal(url)
+    return { action: 'deny' }
   })
 
   // Drop the reference once the window is gone so the optional chaining in
@@ -117,18 +134,72 @@ function send(channel: string, payload: unknown): void {
   win.webContents.send(channel, payload)
 }
 
-function startBridge(cfg?: BridgeConfig): void {
+async function startBridge(cfg?: BridgeConfig): Promise<void> {
   if (!bridge) bridge = new Bridge(BRIDGE_PATH)
   bridge.removeAllListeners()
+
+  // Resolve the effective connection: explicit request > last-saved > factory
+  // default. The S2E ships on a fixed 192.168.11.2:8089, so the beginner path
+  // needs no input at all.
+  const saved = loadSettings().connection
+  const ip = cfg?.ip ?? saved?.ip ?? '192.168.11.2'
+  const port = cfg?.port ?? saved?.port ?? 8089
+  lastConfig = { ip, port }
+  savedFor = ''
 
   // Fresh session: drop stale tracks / zone occupancy so ids and enter/exit
   // events do not leak across restarts.
   tracker.reset()
   zoneEval.reset()
 
+  // Preflight: with no host adapter on the target /24 the bridge would only
+  // spin in a reconnect loop, so surface a no-network state and never spawn.
+  if (!cfg?.skipPreflight) {
+    try {
+      const diag = await diagnose(ip)
+      if (!diag.ok) {
+        send(IPC.status, { state: 'no-network', message: `no adapter on ${ip.split('.').slice(0, 3).join('.')}.x` })
+        return
+      }
+    } catch {
+      // Diagnosis failure must not block a connect attempt; fall through.
+    }
+  }
+
   bridge.on('status', (s) => {
     console.log('[main] bridge:', s.state, s.message ?? '')
+    // Persist the last-used connection once we reach a live state for it.
+    if ((s.state === 'connected' || s.state === 'scanning') && savedFor !== `${ip}:${port}`) {
+      savedFor = `${ip}:${port}`
+      saveSettings({ connection: lastConfig })
+    }
     send(IPC.status, s)
+  })
+
+  // Exit hook: re-diagnose so the UI recovers from an adapter loss (macOS
+  // re-plug drops the static IP) vs. an unresponsive device. Codes 3/4 are the
+  // "connect failed" / "no response" cases where this distinction matters.
+  bridge.on('exit', async (code: number | null) => {
+    if (code !== 3 && code !== 4) return
+    try {
+      const diag = await diagnose(lastConfig.ip)
+      if (!diag.ok) {
+        send(IPC.status, {
+          state: 'no-network',
+          message: `adapter lost its ${lastConfig.ip.split('.').slice(0, 3).join('.')}.x address`
+        })
+        return
+      }
+      const probe = await probeDevice(lastConfig.ip)
+      send(IPC.status, {
+        state: 'error',
+        message: probe.found
+          ? 'device detected on ARP but not answering — power-cycle the sensor'
+          : 'adapter OK — device not responding (check cable/power/hub; S2E ignores ping)'
+      })
+    } catch {
+      // Never let re-diagnosis crash main.
+    }
   })
   bridge.on('log', (l) => {
     console.log('[main] bridge-log:', l)
@@ -215,7 +286,7 @@ function startBridge(cfg?: BridgeConfig): void {
     send(IPC.frame, frame)
   })
 
-  bridge.start(cfg?.ip, cfg?.port)
+  bridge.start(ip, port)
 }
 
 app.whenReady().then(() => {
@@ -285,6 +356,12 @@ app.whenReady().then(() => {
   ipcMain.handle(IPC.getState, () => {
     return currentPreset()
   })
+
+  // --- Network diagnosis / device probe / adapter configuration ------------
+  ipcMain.handle(IPC.networkDiagnose, (_e, targetIp: string) => diagnose(targetIp))
+  ipcMain.handle(IPC.networkProbe, (_e, targetIp: string) => probeDevice(targetIp))
+  ipcMain.handle(IPC.networkConfigure, (_e, req: NetworkConfigureRequest) => configure(req))
+  ipcMain.handle(IPC.getConnection, () => loadSettings().connection ?? null)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

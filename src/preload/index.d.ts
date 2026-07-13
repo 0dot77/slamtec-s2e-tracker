@@ -7,7 +7,12 @@ import type {
   Zone,
   OscConfig,
   Preset,
-  ZoneEvent
+  ZoneEvent,
+  ConnectionSettings,
+  NetworkDiagnosis,
+  NetworkConfigureRequest,
+  NetworkConfigureResult,
+  DeviceProbeResult
 } from '@shared/types'
 
 declare global {
@@ -28,6 +33,10 @@ declare global {
       savePreset: () => Promise<boolean>
       loadPreset: () => Promise<Preset | null>
       getState: () => Promise<Preset>
+      diagnoseNetwork: (targetIp: string) => Promise<NetworkDiagnosis>
+      configureNetwork: (req: NetworkConfigureRequest) => Promise<NetworkConfigureResult>
+      probeDevice: (targetIp: string) => Promise<DeviceProbeResult>
+      getConnection: () => Promise<ConnectionSettings | null>
     }
   }
 }

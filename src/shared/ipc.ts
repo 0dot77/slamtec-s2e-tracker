@@ -14,6 +14,10 @@ export const IPC = {
   savePreset: 'preset:save',
   loadPreset: 'preset:load',
   getState: 'state:get',
+  networkDiagnose: 'network:diagnose',
+  networkConfigure: 'network:configure',
+  networkProbe: 'network:probe',
+  getConnection: 'settings:connection',
 
   // Main -> renderer (send / on)
   frame: 'frame',

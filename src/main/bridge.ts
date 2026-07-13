@@ -2,6 +2,16 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { EventEmitter } from 'events'
 import { FRAME_MAGIC, HEADER_BYTES, POINT_BYTES, MAX_POINTS } from '../shared/protocol'
 
+// Explicit error text for the bridge's non-zero exit codes (see
+// bridge/src/main.cpp). Anything not listed is an ordinary crash/disconnect and
+// is handled by the reconnect path only.
+const EXIT_REASONS: Record<number, string> = {
+  2: 'driver init failed',
+  3: 'connect failed',
+  4: 'no response from device',
+  5: 'device health error'
+}
+
 export interface RawScan {
   seq: number
   tMs: number
@@ -72,10 +82,18 @@ export class Bridge extends EventEmitter {
     child.on('exit', (code, signal) => {
       if (this.child !== child) return // superseded by a newer spawn: ignore
       this.child = undefined
+      // Surface the raw exit code so the integrator can re-diagnose the network
+      // and distinguish an adapter loss from an unresponsive device.
+      this.emit('exit', code)
       if (this.stopping) {
         this.emit('status', { state: 'stopped', message: `exited (${code ?? signal})` })
         return
       }
+      // Map the bridge's explicit exit codes to human-readable errors before the
+      // reconnect status. These mirror bridge/src/main.cpp: 2=driver init,
+      // 3=connect, 4=no response, 5=device health.
+      const reason = EXIT_REASONS[code ?? -1]
+      if (reason) this.emit('status', { state: 'error', message: reason })
       // Unexpected exit (disconnect / crash): auto-reconnect after a short delay.
       this.emit('status', {
         state: 'connecting',

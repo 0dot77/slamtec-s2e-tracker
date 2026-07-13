@@ -34,6 +34,9 @@ export type BridgeState =
   | 'scanning'
   | 'error'
   | 'stopped'
+  // Preflight found no host adapter on the target /24 subnet; the bridge was
+  // never spawned. The renderer shows the network fix panel for this state.
+  | 'no-network'
 
 export interface BridgeStatus {
   state: BridgeState
@@ -43,6 +46,56 @@ export interface BridgeStatus {
 export interface BridgeConfig {
   ip?: string
   port?: number
+  // Bypass the subnet preflight ("Start anyway" for routed/unusual setups).
+  skipPreflight?: boolean
+}
+
+// Last-used connection, persisted in userData/settings.json on successful connect.
+export interface ConnectionSettings {
+  ip: string
+  port: number
+}
+
+// One host network interface, as seen by the connection diagnosis.
+export interface NetworkInterfaceInfo {
+  name: string // os.networkInterfaces() key (darwin: 'en5'; win32: friendly alias)
+  serviceName?: string // macOS networksetup service name; undefined if no service exists
+  ipv4: string[] // may be empty: unconfigured adapters often carry only fe80:: entries
+  isWifi: boolean
+  isVirtual: boolean
+  isLinkLocal: boolean // has a 169.254.x.x address (DHCP fallback — strong candidate signal)
+  onTargetSubnet: boolean
+  candidate: boolean
+  suggested: boolean // exactly one true among candidates (best ranked)
+}
+
+export interface NetworkDiagnosis {
+  targetIp: string
+  ok: boolean // >=1 interface on the target /24
+  matches: NetworkInterfaceInfo[] // already on the subnet (>1 entry = warn in UI)
+  candidates: NetworkInterfaceInfo[] // configurable choices, ranked best-first
+  all: NetworkInterfaceInfo[]
+  platform: string
+}
+
+// ARP-based device presence probe (the S2E does not answer ICMP ping).
+export interface DeviceProbeResult {
+  found: boolean // targetIp resolved to a valid MAC in the ARP table
+  probedIp: string
+  otherIps: string[] // other live /24 entries — suggestions when the device IP changed
+}
+
+export interface NetworkConfigureRequest {
+  interfaceName: string // NetworkInterfaceInfo.name
+  ip: string // host address to assign, default '192.168.11.100'
+  prefixLength: number // 24
+}
+
+export interface NetworkConfigureResult {
+  ok: boolean // decided solely by post-configure re-diagnosis polling
+  cancelled: boolean // admin/UAC prompt dismissed
+  error?: string
+  diagnosis: NetworkDiagnosis
 }
 
 // Foreground points, angle-ordered. Parallel arrays of length `count`.

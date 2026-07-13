@@ -8,7 +8,12 @@ import type {
   Zone,
   OscConfig,
   Preset,
-  ZoneEvent
+  ZoneEvent,
+  ConnectionSettings,
+  NetworkDiagnosis,
+  NetworkConfigureRequest,
+  NetworkConfigureResult,
+  DeviceProbeResult
 } from '../shared/types'
 import { IPC } from '../shared/ipc'
 
@@ -45,7 +50,14 @@ const api = {
   setOscConfig: (cfg: OscConfig): Promise<boolean> => ipcRenderer.invoke(IPC.setOscConfig, cfg),
   savePreset: (): Promise<boolean> => ipcRenderer.invoke(IPC.savePreset),
   loadPreset: (): Promise<Preset | null> => ipcRenderer.invoke(IPC.loadPreset),
-  getState: (): Promise<Preset> => ipcRenderer.invoke(IPC.getState)
+  getState: (): Promise<Preset> => ipcRenderer.invoke(IPC.getState),
+  diagnoseNetwork: (targetIp: string): Promise<NetworkDiagnosis> =>
+    ipcRenderer.invoke(IPC.networkDiagnose, targetIp),
+  configureNetwork: (req: NetworkConfigureRequest): Promise<NetworkConfigureResult> =>
+    ipcRenderer.invoke(IPC.networkConfigure, req),
+  probeDevice: (targetIp: string): Promise<DeviceProbeResult> =>
+    ipcRenderer.invoke(IPC.networkProbe, targetIp),
+  getConnection: (): Promise<ConnectionSettings | null> => ipcRenderer.invoke(IPC.getConnection)
 }
 
 contextBridge.exposeInMainWorld('api', api)
