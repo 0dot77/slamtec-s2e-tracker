@@ -16,6 +16,7 @@ import CalibrationLayer from './components/CalibrationLayer'
 import ZoneOverlay from './components/ZoneOverlay'
 import ZoneEditor from './components/ZoneEditor'
 import ControlPanel from './components/ControlPanel'
+import NetworkFixPanel from './components/NetworkFixPanel'
 
 const STATE_COLOR: Record<string, string> = {
   idle: '#8a93a6',
@@ -23,8 +24,13 @@ const STATE_COLOR: Record<string, string> = {
   connected: '#37a0d4',
   scanning: '#3ad48c',
   error: '#ff5d5d',
-  stopped: '#8a93a6'
+  stopped: '#8a93a6',
+  // Preflight found no adapter on the target subnet — amber, matches the banner.
+  'no-network': '#e0b341'
 }
+
+// States where a bridge is running (or trying to). Drives the Connect toggle.
+const LIVE_STATES = new Set(['connecting', 'connected', 'scanning'])
 
 type Mode = 'view' | 'calibrate' | 'zones'
 
@@ -32,6 +38,12 @@ export default function App(): JSX.Element {
   const [status, setStatus] = useState<BridgeStatus>({ state: 'idle' })
   const [ip, setIp] = useState('192.168.11.2')
   const [port, setPort] = useState(8089)
+  // The user edited an Advanced field — only then do we pass an explicit config.
+  const [dirty, setDirty] = useState(false)
+  // Show the network fix banner while preflight reports no adapter.
+  const [showNetFix, setShowNetFix] = useState(false)
+  // Unobtrusive ARP-based hint near the status pill: null hides it.
+  const [deviceHint, setDeviceHint] = useState<string | null>(null)
 
   const [mode, setMode] = useState<Mode>('view')
 
@@ -50,9 +62,20 @@ export default function App(): JSX.Element {
 
   const [lastEvent, setLastEvent] = useState<string>('')
 
+  // Guard so the device probe fires at most once per error/connecting episode.
+  const probedFor = useRef<string>('')
+
   // Subscribe to bridge channels once.
   useEffect(() => {
-    const offStatus = window.api?.onStatus(setStatus)
+    const offStatus = window.api?.onStatus((s) => {
+      setStatus(s)
+      if (s.state === 'no-network') setShowNetFix(true)
+      if (s.state === 'connected' || s.state === 'scanning') {
+        setShowNetFix(false)
+        setDeviceHint(null)
+        probedFor.current = ''
+      }
+    })
     const offFrame = window.api?.onFrame((f) => {
       setFrame(f)
       setRuntime(f.zones)
@@ -76,7 +99,25 @@ export default function App(): JSX.Element {
       setCalibration(p.calibration)
       setZones(p.zones)
     })
+    // Restore the last-used connection into the Advanced fields (defaults if none).
+    window.api?.getConnection().then((c) => {
+      if (!c) return
+      setIp(c.ip)
+      setPort(c.port)
+    })
   }, [])
+
+  // On a transient error / connecting state, probe ARP once for a presence hint.
+  // Guarded per-episode so this never becomes a polling loop.
+  useEffect(() => {
+    if (status.state !== 'error' && status.state !== 'connecting') return
+    if (probedFor.current === status.state) return
+    probedFor.current = status.state
+    window.api?.probeDevice(ip).then((r) => {
+      if (!r) return
+      setDeviceHint(r.found ? 'device detected (ARP)' : 'device not detected')
+    })
+  }, [status.state, ip])
 
   // --- Handlers: update local state AND push to main ----------------------
   const handlePipe = useCallback((c: PipelineConfig) => {
@@ -97,6 +138,20 @@ export default function App(): JSX.Element {
   const handleCalibration = useCallback((p: CalibrationPoints) => {
     setCalibration(p)
     window.api?.setCalibration(p)
+  }, [])
+
+  // Connect with no args when untouched (main resolves saved/default config);
+  // pass the explicit override only once the user has edited an Advanced field.
+  const handleConnect = useCallback(() => {
+    if (dirty) window.api?.start({ ip, port })
+    else window.api?.start()
+  }, [dirty, ip, port])
+
+  const handleDisconnect = useCallback(() => {
+    window.api?.stop()
+    setShowNetFix(false)
+    setDeviceHint(null)
+    probedFor.current = ''
   }, [])
 
   const handleLearnBackground = useCallback(() => {
@@ -183,6 +238,7 @@ export default function App(): JSX.Element {
           ● {status.state}
           {status.message ? ` — ${status.message}` : ''}
         </span>
+        {deviceHint ? <span className="dev-hint">{deviceHint}</span> : null}
 
         <div className="seg">
           {(['view', 'calibrate', 'zones'] as Mode[]).map((m) => (
@@ -202,23 +258,51 @@ export default function App(): JSX.Element {
             {lastEvent}
           </span>
         ) : null}
-        <label className="field">
-          IP
-          <input value={ip} onChange={(e) => setIp(e.target.value)} style={{ width: 130 }} />
-        </label>
-        <label className="field">
-          Port
-          <input
-            value={port}
-            onChange={(e) => setPort(Number(e.target.value) || 0)}
-            style={{ width: 70 }}
-          />
-        </label>
-        <button onClick={() => window.api?.start({ ip, port })}>Start</button>
-        <button className="ghost" onClick={() => window.api?.stop()}>
-          Stop
-        </button>
+        {LIVE_STATES.has(status.state) ? (
+          <button className="ghost" onClick={handleDisconnect}>
+            Disconnect
+          </button>
+        ) : (
+          <button onClick={handleConnect}>Connect</button>
+        )}
+
+        <details className="advanced">
+          <summary title="Override the S2E address (rarely needed)">Advanced</summary>
+          <div className="advanced-body">
+            <label className="field">
+              IP
+              <input
+                value={ip}
+                onChange={(e) => {
+                  setIp(e.target.value)
+                  setDirty(true)
+                }}
+                style={{ width: 130 }}
+              />
+            </label>
+            <label className="field">
+              Port
+              <input
+                value={port}
+                onChange={(e) => {
+                  setPort(Number(e.target.value) || 0)
+                  setDirty(true)
+                }}
+                style={{ width: 70 }}
+              />
+            </label>
+          </div>
+        </details>
       </header>
+
+      {showNetFix && (
+        <NetworkFixPanel
+          targetIp={ip}
+          onFixed={handleConnect}
+          onStartAnyway={() => window.api?.start({ ip, port, skipPreflight: true })}
+          onDismiss={() => setShowNetFix(false)}
+        />
+      )}
 
       <div className="body">
         <div className="canvas-wrap">

@@ -128,6 +128,219 @@ body {
   border-radius: 6px;
 }
 
+/* ARP presence hint next to the status pill. */
+.dev-hint {
+  font-size: 11px;
+  color: #8a93a6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Collapsed IP/Port override — hidden from beginners, opened by power users. */
+.advanced > summary {
+  list-style: none;
+  cursor: pointer;
+  color: #8a93a6;
+  font-size: 12px;
+  padding: 5px 8px;
+  border: 1px solid #2a3344;
+  border-radius: 6px;
+  background: #1c2436;
+}
+
+.advanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+.advanced > summary:hover {
+  color: #d7dce5;
+}
+
+.advanced[open] > summary {
+  border-color: #37a0d4;
+  color: #d7dce5;
+}
+
+.advanced-body {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: #11151f;
+  border: 1px solid #1e2533;
+  border-radius: 8px;
+}
+
+/* Network fix banner — amber left border, sits under the topbar. */
+.net-banner {
+  background: #16151a;
+  border-bottom: 1px solid #1e2533;
+  border-left: 3px solid #e0b341;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.net-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.net-head strong {
+  color: #e0b341;
+}
+
+.net-spacer {
+  flex: 1;
+}
+
+.net-x {
+  background: transparent;
+  border: 0;
+  color: #8a93a6;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 6px;
+}
+
+.net-x:hover {
+  color: #d7dce5;
+}
+
+.net-sub {
+  font-size: 12px;
+  color: #8a93a6;
+}
+
+.net-warn {
+  font-size: 12px;
+  color: #e0b341;
+}
+
+.net-ok {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.net-ok-row {
+  font-size: 12px;
+  color: #3ad48c;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.net-fix {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.net-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #8a93a6;
+}
+
+.net-field select {
+  background: #0b0e14;
+  border: 1px solid #2a3344;
+  color: #d7dce5;
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 13px;
+  min-width: 260px;
+}
+
+.net-field select:focus {
+  outline: none;
+  border-color: #37a0d4;
+}
+
+.net-primary {
+  background: #2563a8;
+  border: 1px solid #2f74c0;
+  color: #fff;
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.net-primary:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.net-primary:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.net-ghost {
+  background: #1c2436;
+  border: 1px solid #2a3344;
+  color: #d7dce5;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.net-ghost:hover:not(:disabled) {
+  filter: brightness(1.15);
+}
+
+.net-ghost:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.net-actions,
+.net-suggest,
+.net-guide {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.net-suggest {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.net-note {
+  font-size: 11px;
+  color: #6b7488;
+}
+
+.net-manual > summary {
+  cursor: pointer;
+  color: #8a93a6;
+  font-size: 12px;
+}
+
+.net-manual > summary:hover {
+  color: #d7dce5;
+}
+
+.net-manual pre {
+  background: #0b0e14;
+  border: 1px solid #1e2533;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: #9fb0c8;
+  overflow-x: auto;
+  white-space: pre;
+}
+
 /* Horizontal layout: canvas (flex) + optional zone panel + control panel. */
 .body {
   display: flex;
