@@ -115,7 +115,9 @@ export class OscSender {
     const maxSlots = Math.max(0, Math.floor(cfg.maxSlots))
     this.reconcileSlots(tracks, maxSlots)
 
-    const prefix = cfg.addrPrefix || '/lidar'
+    let prefix = cfg.addrPrefix || '/lidar'
+    if (!prefix.startsWith('/')) prefix = `/${prefix}`
+    prefix = prefix.replace(/\/+$/, '')
 
     try {
       // Active track count.
@@ -145,19 +147,22 @@ export class OscSender {
 
       // Per-zone occupancy.
       for (const z of zones) {
-        const base = `${prefix}/zone/${z.name}`
+        const base = `${prefix}/zone/${this.sanitizeSegment(z.name)}`
         this.sendInt(`${base}/active`, z.active ? 1 : 0)
         this.sendInt(`${base}/count`, z.occupants.length)
       }
 
       // Per-event enter/exit pulses.
       for (const e of events) {
-        const base = `${prefix}/zone/${e.zone}`
+        const base = `${prefix}/zone/${this.sanitizeSegment(e.zone)}`
         this.sendInt(`${base}/${e.type}`, e.id)
       }
     } catch {
       // A send failure (closed socket, bad address) must not crash main.
-      this.ready = false
+      // Rebuild the socket rather than latching ready off forever: dropping the
+      // port makes configure() reopen even though the destination is unchanged.
+      this.closePort()
+      this.configure(cfg)
     }
   }
 
@@ -171,6 +176,17 @@ export class OscSender {
   }
 
   // --- internals ----------------------------------------------------------
+
+  /**
+   * Makes a user-authored name safe for one OSC address segment. Zone names are
+   * free text and default to values with spaces, but OSC forbids space, #, *,
+   * comma, /, ?, [, ], { and } inside an address. Each run of those collapses to
+   * a single '_'; an entirely illegal name falls back to 'zone'.
+   */
+  private sanitizeSegment(name: string): string {
+    const sanitized = name.replace(/[ #*,\/?\[\]{}]+/g, '_').replace(/^_+|_+$/g, '')
+    return sanitized || 'zone'
+  }
 
   /**
    * Releases slots whose track id vanished, then assigns the lowest free slot
