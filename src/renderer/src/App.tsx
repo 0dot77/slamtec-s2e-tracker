@@ -74,6 +74,12 @@ export default function App(): JSX.Element {
         setShowNetFix(false)
         setDeviceHint(null)
         probedFor.current = ''
+        window.api?.getConnection().then((c) => {
+          if (!c) return
+          setIp(c.ip)
+          setPort(c.port)
+          setDirty(false)
+        })
       }
     })
     const offFrame = window.api?.onFrame((f) => {

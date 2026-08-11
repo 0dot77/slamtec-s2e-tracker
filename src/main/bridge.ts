@@ -94,6 +94,8 @@ export class Bridge extends EventEmitter {
       // 3=connect, 4=no response, 5=device health.
       const reason = EXIT_REASONS[code ?? -1]
       if (reason) this.emit('status', { state: 'error', message: reason })
+      // Driver initialization failures are terminal because reconnecting cannot heal them.
+      if (code === 2) return
       // Unexpected exit (disconnect / crash): auto-reconnect after a short delay.
       this.emit('status', {
         state: 'connecting',

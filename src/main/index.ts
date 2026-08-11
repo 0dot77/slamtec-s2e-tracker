@@ -158,6 +158,9 @@ async function startBridge(cfg?: BridgeConfig): Promise<void> {
     try {
       const diag = await diagnose(ip)
       if (!diag.ok) {
+        // Listeners were already removed, so a still-running child would keep
+        // scanning into nowhere unless it is stopped.
+        bridge.stop()
         send(IPC.status, { state: 'no-network', message: `no adapter on ${ip.split('.').slice(0, 3).join('.')}.x` })
         return
       }
