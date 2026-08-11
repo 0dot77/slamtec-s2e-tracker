@@ -115,11 +115,22 @@ int main(int argc, const char **argv) {
     uint32_t seq = 0;
     sl_lidar_response_measurement_node_hq_t nodes[MAX_NODES];
     static uint8_t framebuf[16 + MAX_NODES * 9];
+    int consecutive_failures = 0;
 
     while (!g_stop) {
         size_t count = _countof(nodes);
         sl_result op = drv->grabScanDataHq(nodes, count);
-        if (SL_IS_FAIL(op)) continue;
+        if (SL_IS_FAIL(op)) {
+            if (g_stop) continue;
+            if (++consecutive_failures >= 5) {
+                fprintf(stderr, "[bridge] scan stalled - no data from device, exiting\n");
+                drv->stop();
+                delete drv;
+                return 4;
+            }
+            continue;
+        }
+        consecutive_failures = 0;
         drv->ascendScanData(nodes, count);
 
         const uint32_t t_ms = (uint32_t)std::chrono::duration_cast<std::chrono::milliseconds>(
