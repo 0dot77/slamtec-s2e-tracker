@@ -74,6 +74,7 @@ function findMSBuild() {
       '*',
       '-requires',
       'Microsoft.Component.MSBuild',
+      'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
       '-format',
       'json'
     ])

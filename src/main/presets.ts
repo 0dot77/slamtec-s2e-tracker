@@ -1,6 +1,7 @@
 import { dialog } from 'electron'
 import { readFile, writeFile } from 'node:fs/promises'
 import type { Preset } from '../shared/types'
+import { sanitizePreset } from './validate'
 
 /**
  * Preset persistence for the main process.
@@ -10,13 +11,6 @@ import type { Preset } from '../shared/types'
  * No renderer code lives here; the integrate phase wires these behind the
  * `preset:save` / `preset:load` IPC handlers.
  */
-
-// Shallow structural check: a valid Preset always carries `pipeline` and `osc`.
-function isPreset(value: unknown): value is Preset {
-  if (typeof value !== 'object' || value === null) return false
-  const v = value as Record<string, unknown>
-  return typeof v.pipeline === 'object' && v.pipeline !== null && typeof v.osc === 'object' && v.osc !== null
-}
 
 /**
  * Prompts the user with a native save dialog and writes the preset as
@@ -42,7 +36,8 @@ export async function savePreset(win: Electron.BrowserWindow | null, preset: Pre
 /**
  * Prompts the user with a native open dialog, reads + parses the chosen JSON,
  * and shallow-validates that it looks like a {@link Preset}. Returns null if the
- * dialog is canceled or the file is missing/invalid.
+ * dialog is canceled or the file is missing/invalid. Every field is validated
+ * and missing/out-of-range values fall back to defaults (older presets load).
  */
 export async function loadPreset(win: Electron.BrowserWindow | null): Promise<Preset | null> {
   const result = win
@@ -60,7 +55,7 @@ export async function loadPreset(win: Electron.BrowserWindow | null): Promise<Pr
   try {
     const text = await readFile(result.filePaths[0], 'utf-8')
     const parsed: unknown = JSON.parse(text)
-    return isPreset(parsed) ? parsed : null
+    return sanitizePreset(parsed)
   } catch {
     return null
   }

@@ -38,6 +38,11 @@ const api = {
     ipcRenderer.on(IPC.zoneEvent, listener)
     return () => ipcRenderer.removeListener(IPC.zoneEvent, listener)
   },
+  onState: (cb: (p: Preset) => void): (() => void) => {
+    const listener = (_e: unknown, p: Preset): void => cb(p)
+    ipcRenderer.on(IPC.state, listener)
+    return () => ipcRenderer.removeListener(IPC.state, listener)
+  },
   start: (cfg?: BridgeConfig): Promise<boolean> => ipcRenderer.invoke(IPC.bridgeStart, cfg),
   stop: (): Promise<boolean> => ipcRenderer.invoke(IPC.bridgeStop),
   setPipelineConfig: (cfg: PipelineConfig): Promise<boolean> =>
@@ -48,6 +53,7 @@ const api = {
     ipcRenderer.invoke(IPC.setCalibration, p),
   setZones: (z: Zone[]): Promise<boolean> => ipcRenderer.invoke(IPC.setZones, z),
   setOscConfig: (cfg: OscConfig): Promise<boolean> => ipcRenderer.invoke(IPC.setOscConfig, cfg),
+  setCalibrating: (on: boolean): Promise<boolean> => ipcRenderer.invoke(IPC.setCalibrating, on),
   savePreset: (): Promise<boolean> => ipcRenderer.invoke(IPC.savePreset),
   loadPreset: (): Promise<Preset | null> => ipcRenderer.invoke(IPC.loadPreset),
   getState: (): Promise<Preset> => ipcRenderer.invoke(IPC.getState),

@@ -11,6 +11,9 @@ export const IPC = {
   setCalibration: 'cfg:calibration',
   setZones: 'cfg:zones',
   setOscConfig: 'cfg:osc',
+  // Calibration capture in progress: disables the ROI mask and touch output so
+  // the operator can touch the projected corners outside the old quad.
+  setCalibrating: 'cfg:calibrating',
   savePreset: 'preset:save',
   loadPreset: 'preset:load',
   getState: 'state:get',
@@ -23,5 +26,8 @@ export const IPC = {
   frame: 'frame',
   status: 'bridge-status',
   log: 'bridge-log',
-  zoneEvent: 'zone-event'
+  zoneEvent: 'zone-event',
+  // Full live state (Preset) pushed after main restores or replaces it, so a
+  // (re)loaded renderer hydrates without guessing.
+  state: 'state'
 } as const

@@ -54,15 +54,26 @@ export default function NetworkFixPanel({
   const [noService, setNoService] = useState(false)
 
   const busy = useRef(false)
+  const mounted = useRef(false)
+  const generation = useRef(0)
+  const targetRef = useRef(targetIp)
+  targetRef.current = targetIp
+  const onFixedRef = useRef(onFixed)
+  onFixedRef.current = onFixed
+  const invalidate = (): void => { generation.current += 1; busy.current = false }
+  const isCurrent = (token: number, target: string): boolean =>
+    mounted.current && generation.current === token && targetRef.current === target
 
   const recheck = useCallback(async (): Promise<void> => {
-    if (busy.current) return
+    const token = ++generation.current
     busy.current = true
     setPhase('checking')
     setNote('')
     setNoService(false)
+    setProbe(null)
     try {
       const d = await window.api?.diagnoseNetwork(targetIp)
+      if (!isCurrent(token, targetIp)) return
       if (!d) {
         setPhase('failed')
         setNote('Diagnosis unavailable.')
@@ -74,19 +85,27 @@ export default function NetworkFixPanel({
       setSelected(pick?.name ?? '')
       setPhase('needs-fix')
     } catch (e) {
+      if (!isCurrent(token, targetIp)) return
       setPhase('failed')
       setNote(e instanceof Error ? e.message : String(e))
     } finally {
-      busy.current = false
+      if (isCurrent(token, targetIp)) busy.current = false
     }
   }, [targetIp])
 
   useEffect(() => {
+    mounted.current = true
     void recheck()
+    return () => {
+      mounted.current = false
+      generation.current += 1
+      busy.current = false
+    }
   }, [recheck])
 
   const configure = useCallback(async (): Promise<void> => {
     if (busy.current || !selected) return
+    const token = ++generation.current
     busy.current = true
     setPhase('configuring')
     setNote(IS_WIN ? 'Windows will show a UAC prompt…' : 'Waiting for the admin password…')
@@ -97,6 +116,7 @@ export default function NetworkFixPanel({
         ip: HOST_IP,
         prefixLength: PREFIX
       })
+      if (!isCurrent(token, targetIp)) return
       if (!res) {
         setPhase('failed')
         setNote('Configuration failed.')
@@ -128,17 +148,19 @@ export default function NetworkFixPanel({
       setPhase('verifying')
       setNote('Adapter configured. Looking for the LiDAR…')
       const p = await window.api?.probeDevice(targetIp)
+      if (!isCurrent(token, targetIp)) return
       setProbe(p ?? null)
       setPhase('fixed')
       setNote('Adapter set to 192.168.11.100. Connecting…')
-      onFixed()
+      onFixedRef.current()
     } catch (e) {
+      if (!isCurrent(token, targetIp)) return
       setPhase('failed')
       setNote(e instanceof Error ? e.message : String(e))
     } finally {
-      busy.current = false
+      if (isCurrent(token, targetIp)) busy.current = false
     }
-  }, [selected, targetIp, onFixed])
+  }, [selected, targetIp])
 
   const matches = diag?.matches ?? []
   const candidates = diag?.candidates ?? []
@@ -149,7 +171,7 @@ export default function NetworkFixPanel({
         <strong>No LiDAR network adapter found</strong>
         <span className="net-sub">The S2E lives at {targetIp} — a host adapter must share that subnet.</span>
         <div className="net-spacer" />
-        <button type="button" className="net-x" onClick={onDismiss} title="Dismiss">
+        <button type="button" className="net-x" onClick={() => { invalidate(); onDismiss() }} title="Dismiss">
           ✕
         </button>
       </div>
@@ -249,7 +271,7 @@ export default function NetworkFixPanel({
         <button type="button" className="net-ghost" onClick={recheck} disabled={phase === 'checking'}>
           Re-check
         </button>
-        <button type="button" className="net-ghost" onClick={onStartAnyway}>
+        <button type="button" className="net-ghost" onClick={() => { invalidate(); onStartAnyway() }}>
           Start anyway
         </button>
       </div>

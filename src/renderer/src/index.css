@@ -350,6 +350,7 @@ body {
 
 .canvas-wrap {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   position: relative;
 }
@@ -385,4 +386,74 @@ body {
 
 .hud .accent {
   color: #3ad48c;
+}
+
+/* Wall touch controls use the existing dark surfaces and accent palette. */
+button:disabled { opacity: 0.5; cursor: default !important; }
+.topbar { flex-wrap: wrap; }
+.topbar .seg-btn { background: transparent; border: 0; padding: 4px 10px; color: #8a93a6; }
+.topbar .seg-btn.active, .view-tabs .seg-btn.active { background: #1e2533; color: #d7dce5; }
+.main-view { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+.view-tabs { display: flex; align-items: center; gap: 8px; padding: 6px 12px; background: #11151f; border-bottom: 1px solid #1e2533; }
+.view-tabs .spacer { flex: 1; }
+.view-status { font: 11px ui-monospace, monospace; color: #8a93a6; white-space: nowrap; }
+.view-status.stale { color: #e0b341; }
+.muted { color: #8a93a6; font-size: 11px; line-height: 1.4; }
+.app-error { padding: 6px 14px; background: #2b1820; color: #ff8b8b; font-size: 12px; display: flex; justify-content: space-between; }
+.control-panel { width: 278px; flex: 0 0 auto; padding: 14px 16px; background: #11151f; border-left: 1px solid #1e2533; overflow-y: auto; font-size: 12px; }
+.control-panel fieldset { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.control-title { margin: 16px 0 6px; font-size: 11px; letter-spacing: 0.6px; text-transform: uppercase; color: #8a93a6; }
+.control-panel > .control-title:first-child { margin-top: 0; }
+.ready-badge { display: inline-block; border: 1px solid #806832; border-radius: 20px; padding: 3px 10px; margin-bottom: 5px; color: #e0b341; }
+.ready-badge.ready { border-color: #277552; color: #3ad48c; }
+.control-metrics { display: flex; justify-content: space-between; color: #9fb0c8; font: 11px ui-monospace, monospace; margin-top: 8px; }
+.control-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.control-panel button, .zone-toolbar button, .view-fit { background: #2563a8; border: 1px solid #2f74c0; color: #fff; border-radius: 6px; padding: 6px 9px; font-size: 11px; cursor: pointer; }
+.control-panel button.ghost, .zone-toolbar button.ghost, .view-fit { background: #1c2436; border-color: #2a3344; color: #d7dce5; }
+.control-panel details { padding: 8px 0; border-top: 1px solid #1e2533; }
+.control-panel summary { color: #9fb0c8; cursor: pointer; margin-bottom: 10px; }
+.control-numeric { display: flex; gap: 8px; align-items: center; justify-content: space-between; margin: 7px 0; color: #8a93a6; }
+.control-numeric input { width: 88px; }
+.control-field { display: flex; flex-direction: column; gap: 4px; color: #8a93a6; }
+.control-panel input:not([type=checkbox]), .control-panel select, .wall-settings input[type=number] { background: #0b0e14; border: 1px solid #2a3344; color: #d7dce5; border-radius: 6px; padding: 5px 7px; font: 12px ui-monospace, monospace; min-width: 0; }
+.control-field input, .control-field select { width: 100%; }
+.control-panel input:focus, .wall-settings input:focus, .zone-name-input:focus { outline: none; border-color: #37a0d4; }
+.control-check { display: flex; gap: 6px; align-items: center; font-size: 11px; }
+input[type=checkbox] { accent-color: #3ad48c; }
+.input-error { color: #ff8b8b; font-size: 11px; }
+.view-fit { position: absolute; right: 12px; bottom: 12px; }
+.zone-overlay { position: absolute; top: 0; left: 0; pointer-events: none; overflow: hidden; }
+.zone-toolbar { position: absolute; left: 12px; right: 12px; bottom: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 7px; background: rgba(11,14,20,0.94); border: 1px solid #2a3344; border-radius: 8px; font-size: 11px; }
+.zone-editor { font-size: 12px; }
+.zone-editor-help, .zone-empty { color: #8a93a6; line-height: 1.5; margin-bottom: 12px; }
+.zone-list { display: flex; flex-direction: column; gap: 10px; }
+.zone-card { border: 1px solid #2a3344; border-left: 3px solid var(--zone-color); background: #0b0e14; border-radius: 6px; padding: 9px; }
+.zone-card.active { background: #182333; }
+.zone-card.disabled { opacity: 0.6; }
+.zone-card-main { display: flex; gap: 6px; align-items: center; }
+.zone-color-input { width: 26px; height: 26px; padding: 0; background: transparent; border: 0; cursor: pointer; }
+.zone-name-input { width: 0; min-width: 0; flex: 1; background: transparent; border: 1px solid #2a3344; border-radius: 4px; color: #d7dce5; font-size: 12px; padding: 4px; }
+.zone-occupancy { color: #8a93a6; font: 11px ui-monospace, monospace; }
+.zone-occupancy.active { color: #3ad48c; }
+.zone-delete { border: 0; background: transparent; color: #8a93a6; cursor: pointer; font-size: 17px; padding: 1px 4px; }
+.zone-delete:hover { color: #ff5d5d; }
+.zone-card-options { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; font-size: 11px; color: #8a93a6; }
+.zone-card-options label { display: flex; align-items: center; gap: 4px; }
+.zone-address { display: block; margin-top: 8px; color: #9fb0c8; font-size: 10px; user-select: text; overflow-wrap: anywhere; }
+.wall-view { height: 100%; display: flex; flex-direction: column; min-width: 0; }
+.wall-settings { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; padding: 12px 16px; background: #11151f; border-bottom: 1px solid #1e2533; }
+.wall-settings input[type=number] { width: 80px; }
+.wall-stage { flex: 1; position: relative; min-height: 0; overflow: auto; }
+.wall-hint { position: absolute; top: 14px; left: 24px; right: 24px; }
+.wall-surface { position: absolute; outline: 1px solid #3c475a; box-shadow: 0 0 35px rgba(0,0,0,0.3); }
+.wall-corner { position: absolute; font: 10px ui-monospace, monospace; color: #6b7488; pointer-events: none; }
+.wall-corner.tl { top: -16px; left: 0; }
+.wall-corner.tr { top: -16px; right: 0; }
+.wall-corner.bl { bottom: -16px; left: 0; }
+.wall-corner.br { bottom: -16px; right: 0; }
+.wall-surface .zone-toolbar { left: 0; right: 0; min-width: 220px; }
+@media (max-width: 1100px) {
+  .side-panel { width: 240px; padding: 12px; }
+  .control-panel { width: 250px; padding: 12px; }
+  .evt, .dev-hint { display: none; }
 }

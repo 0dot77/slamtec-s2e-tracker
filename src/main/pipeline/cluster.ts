@@ -72,8 +72,9 @@ function gapMm(fg: FgPoints, i: number, j: number): number {
  * a person straddling the 0°/360° boundary is not split into two blobs.
  *
  * For each cluster: `cx`,`cy` = centroid (mean x, mean y), `count` = point count,
- * and `sizeMm` = the larger axis of the axis-aligned bounding box,
- * i.e. max(maxX - minX, maxY - minY).
+ * and `sizeMm` = the diagonal of the axis-aligned bounding box. The diagonal
+ * bounds the true extent from above for any orientation, so a hand seen edge-on
+ * at 45 degrees is not under-measured by a single bbox axis.
  *
  * Clusters are kept only when count >= `cfg.minClusterPts` and
  * `cfg.minSizeMm` <= sizeMm <= `cfg.maxSizeMm`.
@@ -110,7 +111,7 @@ export function cluster(fg: FgPoints, cfg: PipelineConfig): Cluster[] {
   const out: Cluster[] = []
   for (const a of accs) {
     if (a.count < cfg.minClusterPts) continue
-    const sizeMm = Math.max(a.maxX - a.minX, a.maxY - a.minY)
+    const sizeMm = Math.hypot(a.maxX - a.minX, a.maxY - a.minY)
     if (sizeMm < cfg.minSizeMm || sizeMm > cfg.maxSizeMm) continue
     out.push({
       cx: a.sumX / a.count,

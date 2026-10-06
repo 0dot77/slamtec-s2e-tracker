@@ -2,6 +2,8 @@ import * as os from 'node:os'
 import * as dgram from 'node:dgram'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { join } from 'node:path'
 import type {
   NetworkInterfaceInfo,
   NetworkDiagnosis,
@@ -12,18 +14,25 @@ import type {
 
 /**
  * Host-side network diagnosis, ARP device probing, and one-click elevated
- * adapter configuration for the LiDAR's fixed /24. Dependency-free: only
- * node:os, node:dgram, and node:child_process (arp / networksetup / osascript /
+ * adapter configuration for the LiDAR's fixed /24. Uses Node built-ins only
+ * (arp / networksetup / osascript /
  * netsh / powershell are all stock binaries on their respective platforms).
  *
  * Rationale for the design lives in the plan; the load-bearing constraints are
  * noted inline where they are non-obvious (unconfigured adapters carry no IPv4,
- * the S2E answers no ICMP so presence is ARP-only, RunAs detaches so the
- * elevated exit code cannot be trusted — re-diagnosis polling is the sole
- * source of `ok`).
+ * the S2E answers no ICMP so presence is ARP-only, and an elevated command's
+ * exit code is diagnostic — only the selected adapter's exact address/mask
+ * decides configuration success).
  */
 
 const execFileAsync = promisify(execFile)
+
+// Older renderers send only a factory-default host IP. Remember the sensor
+// target supplied by diagnosis/preflight so that default cannot select the
+// wrong /24. Internal verification must not replace it with a host address.
+let lastTargetIp: string | undefined
+type TargetedConfigureRequest = NetworkConfigureRequest & { targetIp?: string }
+type ResolvedConfigureRequest = NetworkConfigureRequest & { targetIp: string }
 
 // --- subnet helpers ---------------------------------------------------------
 
@@ -61,7 +70,7 @@ const SERVICE_MAP_TTL_MS = 10_000
  * A `(*)` prefix instead of a number marks a disabled service. Returns a
  * Device -> {service, isWifi, enabled} map. Empty on any failure (e.g. non-darwin).
  */
-async function loadServiceMap(force = false): Promise<Map<string, ServiceEntry>> {
+async function loadServiceMap(force = false, throwOnError = false): Promise<Map<string, ServiceEntry>> {
   const now = Date.now()
   if (!force && serviceMapCache && now - serviceMapCache.at < SERVICE_MAP_TTL_MS) {
     return serviceMapCache.map
@@ -86,7 +95,8 @@ async function loadServiceMap(force = false): Promise<Map<string, ServiceEntry>>
       const isWifi = /Wi-?Fi|AirPort/i.test(hardwarePort) || /Wi-?Fi|AirPort/i.test(service)
       map.set(device, { service, isWifi, enabled })
     }
-  } catch {
+  } catch (err) {
+    if (throwOnError) throw err
     // No networksetup (non-darwin) or command failure: empty map.
   }
   serviceMapCache = { map, at: now }
@@ -123,6 +133,11 @@ function isVirtualName(name: string, platform: string): boolean {
 }
 
 export async function diagnose(targetIp: string): Promise<NetworkDiagnosis> {
+  if (isValidIp(targetIp)) lastTargetIp = targetIp
+  return diagnoseTarget(targetIp)
+}
+
+async function diagnoseTarget(targetIp: string): Promise<NetworkDiagnosis> {
   const platform = process.platform
   const serviceMap = platform === 'darwin' ? await loadServiceMap() : new Map<string, ServiceEntry>()
   const ifaces = os.networkInterfaces()
@@ -319,41 +334,91 @@ export async function probeDevice(targetIp: string): Promise<DeviceProbeResult> 
 
 const IP_RE = /^\d{1,3}(\.\d{1,3}){3}$/
 
-function isValidIp(ip: string): boolean {
-  if (!IP_RE.test(ip)) return false
+function isValidIp(ip: unknown): ip is string {
+  if (typeof ip !== 'string' || !IP_RE.test(ip)) return false
   return ip.split('.').every((o) => Number(o) <= 255)
 }
 
-// Repeated diagnose() until the target /24 has an interface or we time out. The
-// result is the SOLE source of truth for configure()'s `ok`.
-async function pollUntilOnSubnet(
-  targetIp: string,
+function commandError(command: string, err: unknown): string {
+  const failure = err as {
+    code?: string | number
+    signal?: string
+    stderr?: string
+    stdout?: string
+    message?: string
+  }
+  const status = failure.code !== undefined ? ` (exit code ${failure.code})` : ''
+  const signal = failure.signal ? ` (signal ${failure.signal})` : ''
+  // execFile's default message includes the entire encoded command. For a
+  // numeric exit status prefer the captured streams, keeping errors readable.
+  const streams = [failure.stderr, failure.stdout].filter(Boolean).map((s) => String(s).trim()).filter(Boolean)
+  const detail = streams.join('\n') ||
+    (typeof failure.code === 'number' ? '' : String(failure.message || err).trim())
+  return `${command} failed${status}${signal}${detail ? `: ${detail}` : ''}`
+}
+
+function selectedInterfaceConfigured(req: ResolvedConfigureRequest): boolean {
+  return (os.networkInterfaces()[req.interfaceName] ?? []).some(
+    (a) => a.family === 'IPv4' && a.address === req.ip && a.netmask === '255.255.255.0'
+  )
+}
+
+// Another adapter on the /24 (or the selected adapter with a wrong address or
+// prefix) must never turn a failed configuration into success.
+async function pollUntilConfigured(
+  req: ResolvedConfigureRequest,
   timeoutMs = 15_000,
   intervalMs = 750
-): Promise<NetworkDiagnosis> {
+): Promise<{ ok: boolean; diagnosis: NetworkDiagnosis }> {
   const deadline = Date.now() + timeoutMs
-  let diag = await diagnose(targetIp)
-  while (!diag.ok && Date.now() < deadline) {
+  let diagnosis = await diagnoseTarget(req.targetIp)
+  let ok = selectedInterfaceConfigured(req)
+  while (!ok && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, intervalMs))
-    diag = await diagnose(targetIp)
+    diagnosis = await diagnoseTarget(req.targetIp)
+    ok = selectedInterfaceConfigured(req)
   }
-  return diag
+  return { ok, diagnosis }
+}
+
+async function configurationResult(
+  req: ResolvedConfigureRequest,
+  cancelled: boolean,
+  error?: string
+): Promise<NetworkConfigureResult> {
+  const { ok, diagnosis } = await pollUntilConfigured(req)
+  return {
+    ok,
+    cancelled: cancelled && !ok,
+    error: error ?? (ok ? undefined : `${req.interfaceName} does not have ${req.ip}/${req.prefixLength}`),
+    diagnosis
+  }
 }
 
 async function configureMac(
-  req: NetworkConfigureRequest,
+  req: ResolvedConfigureRequest,
   mask: string
 ): Promise<NetworkConfigureResult> {
   // Resolve the service name from a fresh (uncached) service map — the map may
   // have gone stale, and configuration must not act on a wrong service.
-  const serviceMap = await loadServiceMap(true)
+  let serviceMap: Map<string, ServiceEntry>
+  try {
+    serviceMap = await loadServiceMap(true, true)
+  } catch (err) {
+    return {
+      ok: false,
+      cancelled: false,
+      error: commandError('networksetup -listnetworkserviceorder', err),
+      diagnosis: await diagnoseTarget(req.targetIp)
+    }
+  }
   const entry = serviceMap.get(req.interfaceName)
   if (!entry || !entry.enabled) {
     return {
       ok: false,
       cancelled: false,
       error: 'no-network-service',
-      diagnosis: await diagnose(req.ip)
+      diagnosis: await diagnoseTarget(req.targetIp)
     }
   }
   const service = entry.service
@@ -363,7 +428,7 @@ async function configureMac(
       ok: false,
       cancelled: false,
       error: 'invalid-service-name',
-      diagnosis: await diagnose(req.ip)
+      diagnosis: await diagnoseTarget(req.targetIp)
     }
   }
 
@@ -378,60 +443,95 @@ async function configureMac(
     ' with prompt "Configure the LiDAR network adapter"'
 
   let cancelled = false
+  let error: string | undefined
   try {
     await execFileAsync('osascript', ['-e', script])
   } catch (err) {
-    const stderr = String((err as { stderr?: string }).stderr ?? (err as Error).message ?? '')
-    if (/User canceled|-128/.test(stderr)) cancelled = true
-    // Any other failure falls through to polling, which decides `ok`.
+    error = commandError('osascript / networksetup', err)
+    if (/User canceled|-128/.test(error)) cancelled = true
   }
 
-  // Even on suspected cancel, re-diagnose: the poll is the sole `ok` source.
-  const diagnosis = await pollUntilOnSubnet(req.ip)
-  return { ok: diagnosis.ok, cancelled: cancelled && !diagnosis.ok, error: undefined, diagnosis }
+  return configurationResult(req, cancelled, error)
 }
 
 async function configureWin(
-  req: NetworkConfigureRequest,
+  req: ResolvedConfigureRequest,
   mask: string
 ): Promise<NetworkConfigureResult> {
   const alias = req.interfaceName
   // A double quote in the alias would break the name="..." netsh argument.
-  if (alias.includes('"')) {
+  if (alias.includes('"') || /[\r\n\0]/.test(alias)) {
     return {
       ok: false,
       cancelled: false,
       error: 'invalid-interface-name',
-      diagnosis: await diagnose(req.ip)
+      diagnosis: await diagnoseTarget(req.targetIp)
     }
   }
 
-  // Escape single quotes for the PowerShell single-quoted argument list by
-  // doubling them. The alias may be Korean / contain spaces — passed as one arg.
-  const aliasPs = alias.replace(/'/g, "''")
-  const cmd =
-    `$p = Start-Process -FilePath netsh -ArgumentList ` +
-    `'interface','ip','set','address','name="${aliasPs}"','static','${req.ip}','${mask}' ` +
-    `-Verb RunAs -Wait -PassThru -WindowStyle Hidden; exit $p.ExitCode`
-
-  const powershell = `${process.env.SystemRoot ?? 'C:\\Windows'}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
-
   let cancelled = false
+  let error: string | undefined
+  let outputDir: string | undefined
   try {
+    const powershell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    const netsh = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'netsh.exe')
+    outputDir = await mkdtemp(join(os.tmpdir(), 's2e-network-'))
+    const stdoutPath = join(outputDir, 'stdout.txt')
+    const stderrPath = join(outputDir, 'stderr.txt')
+    // Escape single quotes in every PowerShell literal. Double quotes around
+    // name= preserve spaces when Start-Process joins its native arguments.
+    const psLiteral = (value: string): string => `'${value.replace(/'/g, "''")}'`
+    const netshArgs = ['interface', 'ip', 'set', 'address', `name="${alias}"`, 'static', req.ip, mask]
+      .map(psLiteral).join(',')
+    // RunAs cannot redirect output (a different Start-Process parameter set).
+    // Elevate a fixed encoded helper, then redirect netsh inside that helper.
+    // No script file can be changed on disk while the UAC prompt is pending.
+    const helper =
+      `try { $p = Start-Process -FilePath ${psLiteral(netsh)} -ArgumentList ${netshArgs} ` +
+      `-Wait -PassThru -WindowStyle Hidden -ErrorAction Stop ` +
+      `-RedirectStandardOutput ${psLiteral(stdoutPath)} -RedirectStandardError ${psLiteral(stderrPath)}; ` +
+      `exit $p.ExitCode } catch { $_ | Out-File -LiteralPath ${psLiteral(stderrPath)} -Encoding utf8; exit 1 }`
+    const encodedHelper = Buffer.from(helper, 'utf16le').toString('base64')
+    const cmd =
+      `try { $p = Start-Process -FilePath ${psLiteral(powershell)} ` +
+      `-ArgumentList '-NoProfile','-NonInteractive','-EncodedCommand','${encodedHelper}' ` +
+      `-Verb RunAs -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop; exit $p.ExitCode } ` +
+      `catch { [Console]::Error.WriteLine($_.Exception.ToString()); exit 1 }`
     await execFileAsync(powershell, ['-NoProfile', '-NonInteractive', '-Command', cmd])
   } catch (err) {
-    const stderr = String((err as { stderr?: string }).stderr ?? (err as Error).message ?? '')
-    // UAC cancel makes Start-Process throw; treat as a fast-fail signal only.
-    if (/cancell?ed|취소/i.test(stderr)) cancelled = true
+    error = commandError('PowerShell / netsh elevation', err)
+    if (/cancell?ed|취소|\b1223\b/i.test(error)) cancelled = true
+    if (outputDir) {
+      // netsh often reports errors on stdout, so retain both streams. UAC
+      // cancellation creates neither file; its outer stderr is already kept.
+      const outputs = await Promise.all(['stderr.txt', 'stdout.txt'].map(async (name) => {
+        try {
+          return (await readFile(join(outputDir!, name), 'utf8')).trim()
+        } catch {
+          return ''
+        }
+      }))
+      const detail = outputs.filter(Boolean).join('\n')
+      if (detail) error += `\n${detail}`
+    }
+  } finally {
+    if (outputDir) await rm(outputDir, { recursive: true, force: true }).catch(() => {})
   }
 
-  const diagnosis = await pollUntilOnSubnet(req.ip)
-  return { ok: diagnosis.ok, cancelled: cancelled && !diagnosis.ok, error: undefined, diagnosis }
+  return configurationResult(req, cancelled, error)
 }
 
 export async function configure(req: NetworkConfigureRequest): Promise<NetworkConfigureResult> {
+  const requestedTarget = (req as TargetedConfigureRequest).targetIp
+  const targetIp = requestedTarget ?? lastTargetIp ?? req.ip
+  // Invalid input still returns a diagnosis rather than throwing while trying
+  // to split an invalid target. Verification never changes the remembered target.
+  const diagnosticTarget = isValidIp(targetIp) ? targetIp : isValidIp(req.ip) ? req.ip : ''
   if (!isValidIp(req.ip)) {
-    return { ok: false, cancelled: false, error: 'invalid-ip', diagnosis: await diagnose(req.ip) }
+    return { ok: false, cancelled: false, error: 'invalid-ip', diagnosis: await diagnoseTarget(diagnosticTarget) }
+  }
+  if ((requestedTarget !== undefined && !isValidIp(requestedTarget)) || !isValidIp(targetIp)) {
+    return { ok: false, cancelled: false, error: 'invalid-target-ip', diagnosis: await diagnoseTarget(req.ip) }
   }
   // Only /24 is supported for now.
   if (req.prefixLength !== 24) {
@@ -439,18 +539,28 @@ export async function configure(req: NetworkConfigureRequest): Promise<NetworkCo
       ok: false,
       cancelled: false,
       error: 'unsupported-prefix',
-      diagnosis: await diagnose(req.ip)
+      diagnosis: await diagnoseTarget(targetIp)
     }
   }
   const mask = '255.255.255.0'
+  const sensorTargetKnown = requestedTarget !== undefined || lastTargetIp !== undefined
+  if (sensorTargetKnown) lastTargetIp = targetIp
+  // req.ip supplies only a subnet fallback when no sensor target is known; its
+  // .100 is a host address, so it must not be mistaken for a .100 sensor.
+  const hostOctet = sensorTargetKnown && Number(targetIp.split('.')[3]) === 100 ? 101 : 100
+  const resolved: ResolvedConfigureRequest = {
+    ...req,
+    targetIp,
+    ip: `${subnet24(targetIp)}.${hostOctet}`
+  }
 
-  if (process.platform === 'darwin') return configureMac(req, mask)
-  if (process.platform === 'win32') return configureWin(req, mask)
+  if (process.platform === 'darwin') return configureMac(resolved, mask)
+  if (process.platform === 'win32') return configureWin(resolved, mask)
 
   return {
     ok: false,
     cancelled: false,
     error: 'unsupported-platform',
-    diagnosis: await diagnose(req.ip)
+    diagnosis: await diagnoseTarget(targetIp)
   }
 }
