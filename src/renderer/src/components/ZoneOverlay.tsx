@@ -1,351 +1,190 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Zone, ZoneRuntime } from '@shared/types'
-import { hexToRgba, makeZone } from '../lib/zones'
+import { clampZonePoint, hexToRgba, makeZone, validateZonePolygon } from '../lib/zones'
 
-// On-canvas zone editor. Sits absolutely on top of the LiDAR view (same pattern
-// as CalibrationLayer) so zones are drawn and edited directly on the real
-// tracking area, warped through the active calibration.
-//
-// Coordinate flow (owned by the parent, which also owns pan/zoom + calibration):
-//   normToScreen(u, v) -> [px, py] | null   normalized [0,1] -> CSS px
-//   screenToNorm(px,py) -> [u, v]  | null   CSS px           -> normalized [0,1]
-// Both return null when no calibration exists (the unit square has no place on
-// the floor yet); in that case drawing is disabled and a hint is shown.
-
+type Point = [number, number]
+type Tool = 'edit' | 'polygon' | 'rectangle'
 interface Props {
   width: number
   height: number
   zones: Zone[]
   runtime?: ZoneRuntime[]
   calibrated: boolean
-  normToScreen: (u: number, v: number) => [number, number] | null
-  screenToNorm: (px: number, py: number) => [number, number] | null
+  normToScreen: (u: number, v: number) => Point | null
+  screenToNorm: (px: number, py: number) => Point | null
   onChange: (zones: Zone[]) => void
+  toolbarBelow?: boolean
 }
 
-// Pixel radius for "click the first vertex to close" and grabbing handles.
-const CLOSE_PX = 12
-
 export default function ZoneOverlay({
-  width,
-  height,
-  zones,
-  runtime,
-  calibrated,
-  normToScreen,
-  screenToNorm,
-  onChange
+  width, height, zones, runtime, calibrated, normToScreen, screenToNorm, onChange, toolbarBelow = false
 }: Props): JSX.Element {
-  const [drawing, setDrawing] = useState(false)
-  const [draft, setDraft] = useState<Array<[number, number]>>([])
-  const [hover, setHover] = useState<[number, number] | null>(null)
-
-  // Latest values for the window-level key handler without re-binding it.
+  const svgRef = useRef<SVGSVGElement>(null)
+  const [tool, setTool] = useState<Tool>('edit')
+  const [draft, setDraft] = useState<Point[]>([])
+  const [hover, setHover] = useState<Point | null>(null)
+  const [selected, setSelected] = useState<string | null>(null)
+  const [preview, setPreview] = useState<Zone | null>(null)
+  const [error, setError] = useState('')
+  const dragRef = useRef<{ id: string; index: number; points: Point[] } | null>(null)
+  const rectangleRef = useRef<Point | null>(null)
   const draftRef = useRef(draft)
-  const drawingRef = useRef(drawing)
   draftRef.current = draft
-  drawingRef.current = drawing
-
-  // Vertex drag (existing zones): which zone + vertex is being moved.
-  const dragRef = useRef<{ zoneId: string; idx: number } | null>(null)
-
-  const rtById = new Map<string, ZoneRuntime>()
-  if (runtime) for (const r of runtime) rtById.set(r.id, r)
-
-  const startDrawing = (): void => {
-    setDraft([])
-    setHover(null)
-    setDrawing(true)
-  }
-  const cancelDraft = (): void => {
-    setDraft([])
-    setHover(null)
-    setDrawing(false)
-  }
-  const commitDraft = (): void => {
-    if (draftRef.current.length >= 3) {
-      onChange([...zones, makeZone(draftRef.current, zones)])
-    }
-    cancelDraft()
-  }
-
-  // Esc cancels an in-progress draft; Enter commits it.
+  const zonesRef = useRef(zones)
+  zonesRef.current = zones
+  const changeRef = useRef(onChange)
+  changeRef.current = onChange
+  const cancel = useCallback((): void => {
+    setTool('edit'); setDraft([]); draftRef.current = []; setHover(null)
+    setPreview(null); dragRef.current = null; rectangleRef.current = null; setError('')
+  }, [])
+  const commit = useCallback((points: Point[] = draftRef.current): void => {
+    const problem = validateZonePolygon(points)
+    if (problem) { setError(problem); return }
+    if (zonesRef.current.length >= 64) { setError('Use at most 64 areas'); return }
+    const zone = makeZone(points, zonesRef.current)
+    changeRef.current([...zonesRef.current, zone]); cancel(); setSelected(zone.id)
+  }, [cancel])
+  const removeSelected = useCallback((): void => {
+    if (!selected) return
+    changeRef.current(zonesRef.current.filter((zone) => zone.id !== selected))
+    setSelected(null)
+  }, [selected])
   useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      if (!drawingRef.current) return
-      if (e.key === 'Escape') cancelDraft()
-      else if (e.key === 'Enter') commitDraft()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-    // commitDraft/cancelDraft close over zones; re-bind when it changes. Live
-    // values (draft, drawing) are read from refs inside the handler.
-  }, [zones])
-
-  // ---- Drawing surface (capture rect) interactions ----
-  const onSurfaceClick = (e: React.MouseEvent): void => {
-    if (e.detail > 1) return // ignore the click that belongs to a double-click
-    const p = screenToNorm(e.nativeEvent.offsetX, e.nativeEvent.offsetY)
-    if (!p) return
-    const d = draftRef.current
-    // Close by clicking near the first vertex (measured in screen px).
-    if (d.length >= 3) {
-      const first = normToScreen(d[0][0], d[0][1])
-      if (first) {
-        const dx = e.nativeEvent.offsetX - first[0]
-        const dy = e.nativeEvent.offsetY - first[1]
-        if (Math.hypot(dx, dy) <= CLOSE_PX) {
-          commitDraft()
-          return
-        }
+    if (selected && !zones.some((zone) => zone.id === selected)) setSelected(null)
+  }, [zones, selected])
+  useEffect(() => {
+    const key = (event: KeyboardEvent): void => {
+      if ((event.target as HTMLElement)?.closest('input,textarea,select,button,[contenteditable]')) return
+      if (event.key === 'Escape') { cancel(); setSelected(null) }
+      if (event.key === 'Enter' && tool === 'polygon') { event.preventDefault(); commit() }
+      if ((event.key === 'Delete' || event.key === 'Backspace') && tool === 'edit' && selected) {
+        event.preventDefault(); removeSelected()
       }
     }
-    setDraft([...d, p])
+    window.addEventListener('keydown', key)
+    return () => window.removeEventListener('keydown', key)
+  }, [tool, selected, commit, cancel, removeSelected])
+  const eventPoint = (event: { clientX: number; clientY: number }): { screen: Point; norm: Point } | null => {
+    const rect = svgRef.current?.getBoundingClientRect()
+    if (!rect || !rect.width || !rect.height) return null
+    const screen: Point = [(event.clientX - rect.left) * width / rect.width, (event.clientY - rect.top) * height / rect.height]
+    const point = screenToNorm(...screen)
+    return point && point.every(Number.isFinite) ? { screen, norm: clampZonePoint(point) } : null
   }
-  const onSurfaceMove = (e: React.MouseEvent): void => {
-    const p = screenToNorm(e.nativeEvent.offsetX, e.nativeEvent.offsetY)
-    if (p) setHover(p)
-  }
-
-  // ---- Existing-zone vertex drag ----
-  const onVertexDown =
-    (zoneId: string, idx: number) => (e: React.PointerEvent<SVGCircleElement>): void => {
-      if (drawing) return
-      e.preventDefault()
-      e.stopPropagation()
-      dragRef.current = { zoneId, idx }
-      e.currentTarget.setPointerCapture(e.pointerId)
+  const project = (points: Point[]): Point[] | null => {
+    const output: Point[] = []
+    for (const point of points) {
+      const screen = normToScreen(...point)
+      if (!screen || !screen.every(Number.isFinite)) return null
+      output.push(screen)
     }
-  const onVertexMove = (e: React.PointerEvent<SVGCircleElement>): void => {
+    return output
+  }
+  const projected = useMemo(() => zones.map((zone) => ({
+    zone, screen: project(preview?.id === zone.id ? preview.polygon : zone.polygon)
+  })), [zones, preview, normToScreen])
+  const active = useMemo(() => new Set(runtime?.filter((zone) => zone.active).map((zone) => zone.id)), [runtime])
+  const draftScreen = project(draft)
+  const hoverScreen = hover ? normToScreen(...hover) : null
+  const startTool = (next: Tool): void => { cancel(); setSelected(null); setTool(next) }
+  const rectPoints = (a: Point, b: Point): Point[] => [[a[0], a[1]], [b[0], a[1]], [b[0], b[1]], [a[0], b[1]]]
+  const surfaceDown = (event: React.PointerEvent<SVGRectElement>): void => {
+    if (event.button !== 0 || (tool !== 'rectangle' && !(tool === 'polygon' && event.shiftKey))) return
+    const point = eventPoint(event)
+    if (!point) return
+    rectangleRef.current = point.norm
+    setDraft(rectPoints(point.norm, point.norm)); setError('')
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+  const surfaceMove = (event: React.PointerEvent<SVGRectElement>): void => {
+    const point = eventPoint(event)
+    if (!point) return
+    if (rectangleRef.current) {
+      const next = rectPoints(rectangleRef.current, point.norm)
+      setDraft(next); draftRef.current = next
+    } else setHover(point.norm)
+  }
+  const surfaceUp = (event: React.PointerEvent<SVGRectElement>): void => {
+    if (!rectangleRef.current) return
+    const point = eventPoint(event)
+    const next = point ? rectPoints(rectangleRef.current, point.norm) : draftRef.current
+    rectangleRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+    commit(next)
+  }
+  const surfaceClick = (event: React.MouseEvent<SVGRectElement>): void => {
+    if (tool !== 'polygon' || event.detail > 1 || event.shiftKey) return
+    const point = eventPoint(event)
+    if (!point) return
+    const first = draftRef.current[0] && normToScreen(...draftRef.current[0])
+    if (draftRef.current.length >= 3 && first && Math.hypot(point.screen[0] - first[0], point.screen[1] - first[1]) <= 12) {
+      commit(); return
+    }
+    if (draftRef.current.length >= 64) { setError('Use at most 64 corners'); return }
+    const last = draftRef.current[draftRef.current.length - 1]
+    if (last && Math.hypot(last[0] - point.norm[0], last[1] - point.norm[1]) < 1e-6) return
+    const next = [...draftRef.current, point.norm]
+    draftRef.current = next; setDraft(next); setError('')
+  }
+  const vertexUp = (event: React.PointerEvent<SVGCircleElement>, cancelled = false): void => {
     const drag = dragRef.current
     if (!drag) return
-    const p = screenToNorm(e.nativeEvent.offsetX, e.nativeEvent.offsetY)
-    if (!p) return
-    onChange(
-      zones.map((z) =>
-        z.id === drag.zoneId
-          ? { ...z, polygon: z.polygon.map((pt, i) => (i === drag.idx ? p : pt)) }
-          : z
-      )
-    )
+    const problem = validateZonePolygon(drag.points)
+    if (!cancelled && !problem) {
+      changeRef.current(zonesRef.current.map((zone) => zone.id === drag.id ? { ...zone, polygon: drag.points } : zone))
+    } else if (!cancelled && problem) setError(problem)
+    setPreview(null); dragRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
   }
-  const onVertexUp = (e: React.PointerEvent<SVGCircleElement>): void => {
-    if (!dragRef.current) return
-    dragRef.current = null
-    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-      e.currentTarget.releasePointerCapture(e.pointerId)
-    }
-  }
-
-  // Project a normalized polygon to screen px; null if any point is unmapped.
-  const project = (poly: Array<[number, number]>): Array<[number, number]> | null => {
-    const out: Array<[number, number]> = []
-    for (const [u, v] of poly) {
-      const s = normToScreen(u, v)
-      if (!s) return null
-      out.push(s)
-    }
-    return out
-  }
-
-  const draftScreen = drawing ? project(draft) : null
-  const hoverScreen = hover ? normToScreen(hover[0], hover[1]) : null
-
-  return (
-    <svg
-      width={width}
-      height={height}
-      style={{
-        position: 'absolute',
-        top: 0,
-        left: 0,
-        width,
-        height,
-        pointerEvents: 'none',
-        overflow: 'visible'
-      }}
-    >
-      {/* Capture rect: only active while drawing, so pan/zoom and vertex drag
-          stay usable otherwise. */}
-      {drawing && (
-        <rect
-          x={0}
-          y={0}
-          width={width}
-          height={height}
-          fill="transparent"
-          style={{ pointerEvents: 'all', cursor: 'crosshair' }}
-          onClick={onSurfaceClick}
-          onMouseMove={onSurfaceMove}
-          onDoubleClick={(e) => {
-            e.preventDefault()
-            commitDraft()
-          }}
-        />
-      )}
-
-      {/* Existing zones: outline + draggable vertices. Fill/active highlight is
-          drawn by LidarCanvas underneath; here we add the editing affordances. */}
-      {zones.map((z) => {
-        const scr = project(z.polygon)
-        if (!scr || scr.length < 2) return null
-        const active = rtById.get(z.id)?.active ?? false
-        const stroke = z.enabled ? z.color : hexToRgba(z.color, 0.4)
-        return (
-          <g key={z.id}>
-            <polygon
-              points={scr.map((p) => `${p[0]},${p[1]}`).join(' ')}
-              fill="none"
-              stroke={stroke}
-              strokeWidth={active ? 2 : 1.25}
-              style={{ pointerEvents: 'none' }}
-            />
-            {!drawing &&
-              scr.map((p, i) => (
-                <circle
-                  key={i}
-                  cx={p[0]}
-                  cy={p[1]}
-                  r={5}
-                  fill="#11151f"
-                  stroke={stroke}
-                  strokeWidth={2}
-                  style={{ pointerEvents: 'all', cursor: 'grab' }}
-                  onPointerDown={onVertexDown(z.id, i)}
-                  onPointerMove={onVertexMove}
-                  onPointerUp={onVertexUp}
-                  onPointerCancel={onVertexUp}
-                />
-              ))}
-          </g>
-        )
-      })}
-
-      {/* In-progress draft: chain + rubber-band to cursor + close hint. */}
-      {draftScreen && draftScreen.length > 0 && (
-        <>
-          <polyline
-            points={[...draftScreen, ...(hoverScreen ? [hoverScreen] : [])]
-              .map((p) => `${p[0]},${p[1]}`)
-              .join(' ')}
-            fill="none"
-            stroke="#37a0d4"
-            strokeWidth={1.5}
-            style={{ pointerEvents: 'none' }}
-          />
-          {draftScreen.map((p, i) => (
-            <circle
-              key={i}
-              cx={p[0]}
-              cy={p[1]}
-              r={i === 0 ? 5 : 3}
-              fill={i === 0 ? '#3ad48c' : '#37a0d4'}
-              style={{ pointerEvents: 'none' }}
-            />
-          ))}
-          {draftScreen.length >= 3 && (
-            <circle
-              cx={draftScreen[0][0]}
-              cy={draftScreen[0][1]}
-              r={CLOSE_PX}
-              fill="none"
-              stroke="rgba(58,212,140,0.6)"
-              strokeWidth={1}
-              style={{ pointerEvents: 'none' }}
-            />
-          )}
-        </>
-      )}
-
-      {/* Toolbar pinned to the bottom (foreignObject so we can use plain DOM
-          buttons); top-left is occupied by the LiDAR HUD. */}
-      <foreignObject x={8} y={Math.max(0, height - 44)} width={Math.max(0, width - 16)} height={40}>
-        <div
-          style={{
-            display: 'flex',
-            gap: 8,
-            alignItems: 'center',
-            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-            fontSize: 11,
-            pointerEvents: 'none'
-          }}
-        >
-          {!calibrated ? (
-            <span
-              style={{
-                background: 'rgba(11,14,20,0.85)',
-                color: '#e0b341',
-                padding: '4px 8px',
-                borderRadius: 6
-              }}
-            >
-              Calibrate the floor first to draw zones.
-            </span>
-          ) : !drawing ? (
-            <button
-              onClick={startDrawing}
-              style={{
-                pointerEvents: 'all',
-                background: '#2563a8',
-                border: '1px solid #2f74c0',
-                color: '#fff',
-                borderRadius: 6,
-                padding: '4px 10px',
-                fontSize: 11,
-                cursor: 'pointer'
-              }}
-            >
-              + Draw zone
-            </button>
-          ) : (
-            <>
-              <span
-                style={{
-                  background: 'rgba(11,14,20,0.85)',
-                  color: '#37a0d4',
-                  padding: '4px 8px',
-                  borderRadius: 6
-                }}
-              >
-                drawing · {draft.length} pt{draft.length === 1 ? '' : 's'} · click to add,
-                dbl-click / Enter to finish, Esc to cancel
-              </span>
-              <button
-                onClick={commitDraft}
-                disabled={draft.length < 3}
-                style={{
-                  pointerEvents: 'all',
-                  background: '#2563a8',
-                  border: '1px solid #2f74c0',
-                  color: '#fff',
-                  borderRadius: 6,
-                  padding: '4px 10px',
-                  fontSize: 11,
-                  cursor: draft.length < 3 ? 'not-allowed' : 'pointer',
-                  opacity: draft.length < 3 ? 0.5 : 1
-                }}
-              >
-                Finish
-              </button>
-              <button
-                onClick={cancelDraft}
-                style={{
-                  pointerEvents: 'all',
-                  background: '#1c2436',
-                  border: '1px solid #2a3344',
-                  color: '#d7dce5',
-                  borderRadius: 6,
-                  padding: '4px 10px',
-                  fontSize: 11,
-                  cursor: 'pointer'
-                }}
-              >
-                Cancel
-              </button>
-            </>
-          )}
-        </div>
-      </foreignObject>
+  return <>
+    <svg ref={svgRef} width={width} height={height} className="zone-overlay" style={{ width, height }}>
+      {calibrated && tool !== 'edit' && <rect width={width} height={height} fill="transparent"
+        style={{ pointerEvents: 'all', cursor: 'crosshair', touchAction: 'none' }}
+        onClick={surfaceClick} onDoubleClick={(e) => { if (tool === 'polygon') { e.preventDefault(); commit() } }}
+        onPointerDown={surfaceDown} onPointerMove={surfaceMove} onPointerUp={surfaceUp}
+        onPointerCancel={() => { rectangleRef.current = null; setDraft([]); draftRef.current = [] }} />}
+      {projected.map(({ zone, screen }) => screen && screen.length >= 3 ? <g key={zone.id}>
+        <polygon points={screen.map((p) => p.join(',')).join(' ')}
+          fill={hexToRgba(zone.color, preview?.id === zone.id ? 0.2 : 0.02)}
+          stroke={hexToRgba(zone.color, zone.enabled ? 0.95 : 0.4)} strokeWidth={selected === zone.id || active.has(zone.id) ? 2 : 1}
+          style={{ pointerEvents: tool === 'edit' ? 'all' : 'none', cursor: 'pointer' }}
+          onPointerDown={(e) => { e.stopPropagation(); setSelected(zone.id); setError('') }} />
+        {tool === 'edit' && selected === zone.id && screen.map((p, index) => <circle key={index}
+          cx={p[0]} cy={p[1]} r={6} fill="#11151f" stroke={zone.color} strokeWidth={2}
+          style={{ pointerEvents: 'all', cursor: 'grab', touchAction: 'none' }}
+          onPointerDown={(e) => {
+            e.preventDefault(); e.stopPropagation()
+            dragRef.current = { id: zone.id, index, points: zone.polygon.map((p) => [...p] as Point) }
+            setError(''); e.currentTarget.setPointerCapture(e.pointerId)
+          }} onPointerMove={(e) => {
+            const drag = dragRef.current; const point = eventPoint(e)
+            if (!drag || !point) return
+            drag.points = drag.points.map((p, i) => i === drag.index ? point.norm : p)
+            setPreview({ ...zone, polygon: drag.points })
+          }} onPointerUp={(e) => vertexUp(e)} onPointerCancel={(e) => vertexUp(e, true)} />)}
+      </g> : null)}
+      {draftScreen && draftScreen.length > 0 && <>
+        <polyline points={[...draftScreen, ...(tool === 'polygon' && !rectangleRef.current && hoverScreen ? [hoverScreen] : [])].map((p) => p.join(',')).join(' ')}
+          fill={tool === 'rectangle' || rectangleRef.current ? 'rgba(55,160,212,0.15)' : 'none'} stroke="#37a0d4" strokeWidth={1.5} />
+        {draftScreen.map((p, i) => <circle key={i} cx={p[0]} cy={p[1]} r={i === 0 ? 5 : 3} fill={i === 0 ? '#3ad48c' : '#37a0d4'} />)}
+        {draft.length >= 3 && tool === 'polygon' && <circle cx={draftScreen[0][0]} cy={draftScreen[0][1]} r={12} fill="none" stroke="#3ad48c" />}
+      </>}
     </svg>
-  )
+    <div className="zone-toolbar" style={toolbarBelow ? { top: height + 12, bottom: 'auto' } : undefined}>
+      {!calibrated ? <span className="muted">Apply a calibration to draw in LiDAR space.</span> : <>
+        {tool === 'edit' ? <>
+          <button onClick={() => startTool('polygon')}>+ Draw polygon</button>
+          <button className="ghost" onClick={() => startTool('rectangle')}>Rectangle</button>
+          {selected && <button className="ghost" onClick={removeSelected}>Delete selected</button>}
+          <span className="muted">Select an area to drag its vertices.</span>
+        </> : <>
+          <span className="muted">{tool === 'rectangle' ? 'Drag a rectangle.' : `${draft.length} corners · click first / double-click / Enter to close · Shift-drag rectangle`}</span>
+          {tool === 'polygon' && <button disabled={draft.length < 3} onClick={() => commit()}>Finish</button>}
+          <button className="ghost" onClick={cancel}>Cancel</button>
+        </>}
+      </>}
+      {error && <span className="input-error" role="alert">{error}</span>}
+    </div>
+  </>
 }

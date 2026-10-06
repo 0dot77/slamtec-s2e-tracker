@@ -1,356 +1,264 @@
-import { useEffect, useRef, useState } from 'react'
-import type { CalibrationPoints, Track, VizFrame, Zone, ZoneRuntime } from '@shared/types'
+import { memo, useEffect, useMemo, useRef } from 'react'
+import type { CalibrationPoints, PipelineConfig, Zone } from '@shared/types'
 import { applyHomography, type Mat3 } from '@shared/homography'
-import { hexToRgba } from '../lib/zones'
+import type { FrameSource } from '../lib/frameStore'
+import { hexToRgba, PALETTE } from '../lib/zones'
+import { angleInSector, keptSectorSpan, sensorDegrees } from '../lib/scanMask'
 
 export interface View {
-  scale: number // pixels per millimeter (device px)
-  ox: number // screen x of LiDAR origin (device px)
-  oy: number // screen y of LiDAR origin (device px)
-  dpr: number // device pixel ratio captured with this view
-  cssW: number // canvas CSS width (px)
-  cssH: number // canvas CSS height (px)
+  scale: number
+  ox: number
+  oy: number
+  dpr: number
+  cssW: number
+  cssH: number
 }
-
 interface Props {
-  // Latest frame to draw. The parent owns the subscription so it can also feed
-  // tracks/zones to the side panels; LidarCanvas just renders what it is given.
-  frame: VizFrame | null
-  // Active calibration quad (LiDAR mm) to outline, or null. Drawn faintly so the
-  // user keeps spatial context even outside Calibrate mode.
-  calibration?: CalibrationPoints | null
-  // Notified whenever the view transform changes (mount, resize, wheel, drag) so
-  // the parent can keep overlays (CalibrationLayer) aligned with pan/zoom.
-  onView?: (v: View) => void
-  // Event zones (normalized polygons) drawn warped onto the floor, plus the
-  // inverse homography (normalized -> LiDAR mm) needed to place them. Runtime
-  // adds the live active/occupant state for highlighting.
-  zones?: Zone[]
-  runtime?: ZoneRuntime[]
-  homographyInv?: Mat3 | null
+  frameSource: FrameSource
+  calibration: CalibrationPoints | null
+  config: PipelineConfig
+  zones: Zone[]
+  homographyInv: Mat3 | null
+  onView: (view: View) => void
 }
+type Point = [number, number]
 
-const TRACK_COLORS = ['#3ad48c', '#37a0d4', '#e0b341', '#ff5d5d', '#a079e0', '#37d4c8', '#e07ab4']
-
-export default function LidarCanvas({
-  frame,
-  calibration,
-  onView,
-  zones,
-  runtime,
-  homographyInv
-}: Props): JSX.Element {
+function LidarCanvas({ frameSource, calibration, config, zones, homographyInv, onView }: Props): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const frameRef = useRef<VizFrame | null>(frame)
-  const calibRef = useRef<CalibrationPoints | null>(calibration ?? null)
-  const zonesRef = useRef<Zone[]>(zones ?? [])
-  const runtimeRef = useRef<ZoneRuntime[]>(runtime ?? [])
-  const homInvRef = useRef<Mat3 | null>(homographyInv ?? null)
-  const onViewRef = useRef(onView)
   const viewRef = useRef<View>({ scale: 0.08, ox: 0, oy: 0, dpr: 1, cssW: 0, cssH: 0 })
-  const initedRef = useRef(false)
-  const stampsRef = useRef<number[]>([])
-  // Short position trails per track id (device px), capped length.
-  const trailsRef = useRef<Map<number, Array<[number, number]>>>(new Map())
-  const [hz, setHz] = useState(0)
-  const [pts, setPts] = useState(0)
-  const [seq, setSeq] = useState(0)
+  const scheduleRef = useRef<() => void>(() => {})
+  const fitRef = useRef<() => void>(() => {})
+  // Project normalized polygons into mm once per geometry/calibration change.
+  const projected = useMemo(() => homographyInv ? zones.map((zone) => ({
+    zone, points: zone.polygon.map(([u, v]) => applyHomography(homographyInv, u, v))
+  })).filter((item) => item.points.every(([x, y]) => Number.isFinite(x) && Number.isFinite(y))) : [], [zones, homographyInv])
+  const propsRef = useRef({ calibration, config, projected, homographyInv, onView })
+  propsRef.current = { calibration, config, projected, homographyInv, onView }
 
-  frameRef.current = frame
-  calibRef.current = calibration ?? null
-  zonesRef.current = zones ?? []
-  runtimeRef.current = runtime ?? []
-  homInvRef.current = homographyInv ?? null
-  onViewRef.current = onView
-
-  // HUD counters + FPS estimate, recomputed when a new frame arrives.
-  useEffect(() => {
-    if (!frame) return
-    setPts(frame.count)
-    setSeq(frame.seq)
-    const now = performance.now()
-    const s = stampsRef.current
-    s.push(now)
-    while (s.length > 30) s.shift()
-    if (s.length > 1) {
-      const dt = (s[s.length - 1] - s[0]) / (s.length - 1)
-      setHz(dt > 0 ? 1000 / dt : 0)
-    }
-  }, [frame])
-
-  // Render loop + interactions.
   useEffect(() => {
     const canvas = canvasRef.current!
-    const ctx = canvas.getContext('2d')!
-    const dpr = (): number => window.devicePixelRatio || 1
-
-    const publishView = (): void => {
-      const v = viewRef.current
-      v.dpr = dpr()
-      const r = canvas.getBoundingClientRect()
-      v.cssW = r.width
-      v.cssH = r.height
-      onViewRef.current?.({ ...v })
-    }
-
-    const resize = (): void => {
-      const r = canvas.getBoundingClientRect()
-      canvas.width = Math.max(1, Math.floor(r.width * dpr()))
-      canvas.height = Math.max(1, Math.floor(r.height * dpr()))
-      if (!initedRef.current) {
-        viewRef.current.ox = canvas.width / 2
-        viewRef.current.oy = canvas.height / 2
-        viewRef.current.scale = Math.min(canvas.width, canvas.height) / 8000 // ~8 m across
-        initedRef.current = true
-      }
-      publishView()
-    }
-    resize()
-    const ro = new ResizeObserver(resize)
-    ro.observe(canvas)
-
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
     let raf = 0
-    const draw = (): void => {
-      raf = requestAnimationFrame(draw)
+    let lastSeq: number | null = null
+    const trails = new Map<number, Point[]>()
+    let screenCache: { geometry: typeof projected; key: string; points: Point[][] } | null = null
+    const schedule = (): void => { if (!raf) raf = requestAnimationFrame(draw) }
+    scheduleRef.current = schedule
+    const publish = (): void => {
+      propsRef.current.onView({ ...viewRef.current })
+      schedule()
+    }
+    const fit = (): void => {
       const v = viewRef.current
-      const w = canvas.width
-      const h = canvas.height
-      const d = dpr()
-
-      ctx.fillStyle = '#0b0e14'
-      ctx.fillRect(0, 0, w, h)
-
-      // Range rings every 1 m.
-      ctx.lineWidth = 1
-      ctx.font = `${11 * d}px ui-monospace, monospace`
-      const diag = Math.hypot(w, h)
-      for (let m = 1; m <= 30; m++) {
-        const rr = m * 1000 * v.scale
-        if (rr > diag) break
-        ctx.strokeStyle = m % 5 === 0 ? 'rgba(120,140,170,0.32)' : 'rgba(120,140,170,0.14)'
-        ctx.beginPath()
-        ctx.arc(v.ox, v.oy, rr, 0, Math.PI * 2)
-        ctx.stroke()
-        ctx.fillStyle = 'rgba(150,170,200,0.45)'
-        ctx.fillText(`${m}m`, v.ox + rr + 3 * d, v.oy - 3 * d)
+      const quad = propsRef.current.calibration?.src
+      if (quad) {
+        const xs = quad.map((p) => p[0]); const ys = quad.map((p) => p[1])
+        const minX = Math.min(0, ...xs); const maxX = Math.max(0, ...xs)
+        const minY = Math.min(0, ...ys); const maxY = Math.max(0, ...ys)
+        v.scale = Math.min(canvas.width / Math.max(1000, maxX - minX), canvas.height / Math.max(1000, maxY - minY)) * 0.75
+        v.ox = canvas.width / 2 - (minX + maxX) / 2 * v.scale
+        v.oy = canvas.height / 2 + (minY + maxY) / 2 * v.scale
+      } else {
+        v.scale = Math.min(canvas.width, canvas.height) / 8000
+        v.ox = canvas.width / 2; v.oy = canvas.height / 2
       }
-
-      // Axes.
-      ctx.strokeStyle = 'rgba(120,140,170,0.22)'
-      ctx.beginPath()
-      ctx.moveTo(0, v.oy)
-      ctx.lineTo(w, v.oy)
-      ctx.moveTo(v.ox, 0)
-      ctx.lineTo(v.ox, h)
-      ctx.stroke()
-
-      const f = frameRef.current
-      const s = v.scale
-      const sx = (xMm: number): number => v.ox + xMm * s
-      const sy = (yMm: number): number => v.oy - yMm * s // y flipped
-
-      // Calibration quad outline (faint, drawn under the cloud).
-      const calib = calibRef.current
-      if (calib) {
-        const q = calib.src
-        ctx.strokeStyle = 'rgba(224,179,65,0.55)'
-        ctx.lineWidth = 1.5 * d
-        ctx.beginPath()
-        ctx.moveTo(sx(q[0][0]), sy(q[0][1]))
-        for (let i = 1; i < 4; i++) ctx.lineTo(sx(q[i][0]), sy(q[i][1]))
-        ctx.closePath()
-        ctx.stroke()
+      publish()
+    }
+    fitRef.current = fit
+    let initialized = false
+    const resize = (): void => {
+      const rect = canvas.getBoundingClientRect()
+      const ratio = window.devicePixelRatio || 1
+      const v = viewRef.current
+      const oldW = canvas.width; const oldH = canvas.height; const oldDpr = v.dpr
+      const nextW = Math.max(1, Math.round(rect.width * ratio))
+      const nextH = Math.max(1, Math.round(rect.height * ratio))
+      if (initialized && nextW === oldW && nextH === oldH && v.dpr === ratio) return
+      canvas.width = nextW; canvas.height = nextH
+      v.dpr = ratio; v.cssW = rect.width; v.cssH = rect.height
+      if (!initialized) { initialized = true; fit() }
+      else {
+        v.scale *= ratio / oldDpr
+        v.ox = nextW / 2 + (v.ox - oldW / 2) * ratio / oldDpr
+        v.oy = nextH / 2 + (v.oy - oldH / 2) * ratio / oldDpr
+        publish()
       }
-
-      // Raw point cloud (dim) + foreground points (bright).
-      if (f) {
-        const xy = f.xy
-        const szPt = Math.max(1.5, 1.6 * d)
-        ctx.fillStyle = '#2a4a5a'
-        for (let i = 0; i < f.count; i++) {
-          ctx.fillRect(sx(xy[i * 2]), sy(xy[i * 2 + 1]), szPt, szPt)
+    }
+    const consume = (): void => {
+      const frame = frameSource.getFrame()
+      if (!frame) { trails.clear(); lastSeq = null; schedule(); return }
+      if (lastSeq === frame.seq) return
+      if (lastSeq !== null && frame.seq < lastSeq) trails.clear()
+      lastSeq = frame.seq
+      const live = new Set<number>()
+      for (const track of frame.tracks) {
+        live.add(track.id)
+        const trail = trails.get(track.id) ?? []
+        trail.push([track.x, track.y])
+        if (trail.length > 24) trail.shift()
+        trails.set(track.id, trail)
+      }
+      for (const id of trails.keys()) if (!live.has(id)) trails.delete(id)
+      schedule()
+    }
+    function draw(): void {
+      raf = 0
+      if (!ctx) return
+      const v = viewRef.current
+      const { config: cfg, calibration: quad, projected: geometry, homographyInv: inverse } = propsRef.current
+      const w = canvas.width; const h = canvas.height; const d = v.dpr
+      const sx = (x: number): number => v.ox + x * v.scale
+      const sy = (y: number): number => v.oy - y * v.scale
+      ctx.fillStyle = '#0b0e14'; ctx.fillRect(0, 0, w, h)
+      const outer = Math.max(...[[0, 0], [w, 0], [w, h], [0, h]].map(([x, y]) => Math.hypot(x - v.ox, y - v.oy))) + 2
+      ctx.lineWidth = d; ctx.font = `${11 * d}px ui-monospace, monospace`
+      const ringMm = [250, 500, 1000, 2000, 5000, 10000].find((step) => step * v.scale >= 55 * d) ?? 20000
+      for (let radius = ringMm; radius * v.scale <= outer; radius += ringMm) {
+        ctx.strokeStyle = 'rgba(120,140,170,0.12)'; ctx.beginPath()
+        ctx.arc(v.ox, v.oy, radius * v.scale, 0, Math.PI * 2); ctx.stroke()
+        ctx.fillStyle = '#5b6678'; ctx.fillText(`${radius / 1000} m`, sx(radius) + 4 * d, v.oy - 4 * d)
+      }
+      ctx.strokeStyle = 'rgba(120,140,170,0.22)'; ctx.beginPath()
+      ctx.moveTo(0, v.oy); ctx.lineTo(w, v.oy); ctx.moveTo(v.ox, 0); ctx.lineTo(v.ox, h); ctx.stroke()
+      const frame = frameSource.getFrame()
+      if (frame) {
+        const length = Math.min(frame.count, frame.xy.length >> 1)
+        for (let i = 0; i < length; i++) {
+          const x = frame.xy[i * 2]; const y = frame.xy[i * 2 + 1]
+          if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+          const range = Math.hypot(x, y)
+          const kept = range >= cfg.rangeMinMm && range <= cfg.rangeMaxMm &&
+            angleInSector(Math.atan2(y, x) * 180 / Math.PI, cfg.angleMinDeg, cfg.angleMaxDeg) &&
+            (frame.quality?.[i] ?? 255) >= cfg.minQuality
+          ctx.fillStyle = kept ? '#2a4a5a' : '#38252d'
+          ctx.fillRect(sx(x), sy(y), 1.6 * d, 1.6 * d)
         }
-        const fgxy = f.fg
-        if (fgxy) {
-          const szFg = Math.max(2, 2.2 * d)
+        if (frame.fg) {
           ctx.fillStyle = '#37d4c8'
-          const fgCount = fgxy.length >> 1
-          for (let i = 0; i < fgCount; i++) {
-            ctx.fillRect(sx(fgxy[i * 2]) - szFg / 2, sy(fgxy[i * 2 + 1]) - szFg / 2, szFg, szFg)
+          for (let i = 0; i < frame.fg.length; i += 2) {
+            ctx.fillRect(sx(frame.fg[i]) - d, sy(frame.fg[i + 1]) - d, 2.2 * d, 2.2 * d)
           }
         }
       }
-
-      // Event zones, warped from normalized space onto the floor via the
-      // inverse homography. Drawn over the cloud but under the tracks.
-      const hInv = homInvRef.current
-      const zoneList = zonesRef.current
-      if (hInv && zoneList.length > 0) {
-        const rtById = new Map<string, ZoneRuntime>()
-        for (const r of runtimeRef.current) rtById.set(r.id, r)
-        ctx.font = `${11 * d}px ui-monospace, monospace`
-        for (const zone of zoneList) {
-          if (zone.polygon.length < 2) continue
-          const pts = zone.polygon.map(([u, vv]) => {
-            const [mx, my] = applyHomography(hInv, u, vv)
-            return [sx(mx), sy(my)] as [number, number]
-          })
-          const r = rtById.get(zone.id)
-          const active = r?.active ?? false
-          const dim = !zone.enabled
-
-          ctx.beginPath()
-          ctx.moveTo(pts[0][0], pts[0][1])
-          for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1])
-          ctx.closePath()
-          ctx.fillStyle = hexToRgba(zone.color, active ? 0.3 : dim ? 0.04 : 0.12)
-          ctx.fill()
-          ctx.lineWidth = (active ? 2 : 1.25) * d
-          ctx.strokeStyle = dim ? hexToRgba(zone.color, 0.4) : zone.color
-          ctx.stroke()
-
-          // Centroid label: name + live occupant count.
-          let cx = 0
-          let cy = 0
-          for (const [px, py] of pts) {
-            cx += px
-            cy += py
+      // Sensor angles increase toward +y, hence the negative screen arc angle.
+      const span = keptSectorSpan(cfg.angleMinDeg, cfg.angleMaxDeg)
+      ctx.fillStyle = 'rgba(155,53,65,0.13)'
+      if (span < 360) {
+        const start = sensorDegrees(cfg.angleMaxDeg) * Math.PI / 180
+        const excluded = (360 - span) * Math.PI / 180
+        ctx.beginPath(); ctx.moveTo(v.ox, v.oy)
+        ctx.arc(v.ox, v.oy, outer, -start, -start - excluded, true)
+        ctx.closePath(); ctx.fill()
+      }
+      ctx.beginPath(); ctx.arc(v.ox, v.oy, cfg.rangeMinMm * v.scale, 0, Math.PI * 2); ctx.fill()
+      ctx.beginPath(); ctx.rect(0, 0, w, h)
+      ctx.arc(v.ox, v.oy, cfg.rangeMaxMm * v.scale, 0, Math.PI * 2); ctx.fill('evenodd')
+      ctx.strokeStyle = '#86434e'; ctx.setLineDash([5 * d, 4 * d])
+      for (const limit of [cfg.rangeMinMm, cfg.rangeMaxMm]) {
+        ctx.beginPath(); ctx.arc(v.ox, v.oy, limit * v.scale, 0, Math.PI * 2); ctx.stroke()
+      }
+      for (const angle of span < 360 ? [cfg.angleMinDeg, cfg.angleMaxDeg] : []) {
+        const a = angle * Math.PI / 180
+        ctx.beginPath(); ctx.moveTo(v.ox, v.oy)
+        ctx.lineTo(v.ox + Math.cos(a) * outer, v.oy - Math.sin(a) * outer); ctx.stroke()
+      }
+      ctx.setLineDash([])
+      const labelRadius = Math.min(w, h) * 0.34
+      ctx.fillStyle = '#9f8291'; ctx.textAlign = 'center'
+      for (let angle = 0; angle < 360; angle += 45) {
+        const a = angle * Math.PI / 180
+        ctx.fillText(`${angle}°${angle === 0 ? ' +x' : angle === 90 ? ' +y' : ''}`,
+          v.ox + Math.cos(a) * labelRadius, v.oy - Math.sin(a) * labelRadius)
+      }
+      ctx.textAlign = 'left'
+      if (quad) {
+        ctx.strokeStyle = 'rgba(224,179,65,0.6)'; ctx.lineWidth = 1.5 * d
+        ctx.beginPath(); quad.src.forEach(([x, y], i) => i ? ctx.lineTo(sx(x), sy(y)) : ctx.moveTo(sx(x), sy(y)))
+        ctx.closePath(); ctx.stroke()
+        if (inverse) {
+          ctx.strokeStyle = 'rgba(224,179,65,0.16)'; ctx.lineWidth = d
+          for (const t of [0.25, 0.5, 0.75]) {
+            for (const [a, b] of [[[t, 0], [t, 1]], [[0, t], [1, t]]]) {
+              const p = applyHomography(inverse, a[0], a[1]); const q = applyHomography(inverse, b[0], b[1])
+              ctx.beginPath(); ctx.moveTo(sx(p[0]), sy(p[1])); ctx.lineTo(sx(q[0]), sy(q[1])); ctx.stroke()
+            }
           }
-          cx /= pts.length
-          cy /= pts.length
-          const occ = r?.occupants.length ?? 0
-          const label = `${zone.name} · ${occ}`
-          const tw = ctx.measureText(label).width
-          ctx.fillStyle = 'rgba(11,14,20,0.7)'
-          ctx.fillRect(cx - tw / 2 - 4 * d, cy - 8 * d, tw + 8 * d, 16 * d)
-          ctx.fillStyle = dim ? '#8a93a6' : '#d7dce5'
-          ctx.textAlign = 'center'
-          ctx.textBaseline = 'middle'
-          ctx.fillText(label, cx, cy)
-          ctx.textAlign = 'left'
-          ctx.textBaseline = 'alphabetic'
         }
       }
-
-      // Tracks: trail + dot + id label.
-      const trails = trailsRef.current
-      if (f) {
-        const live = new Set<number>()
-        for (const t of f.tracks) {
-          live.add(t.id)
-          let trail = trails.get(t.id)
-          if (!trail) {
-            trail = []
-            trails.set(t.id, trail)
-          }
-          trail.push([t.x, t.y])
-          while (trail.length > 24) trail.shift()
-        }
-        // Drop trails for vanished tracks.
-        for (const id of trails.keys()) if (!live.has(id)) trails.delete(id)
-
-        for (const t of f.tracks) {
-          const color = TRACK_COLORS[t.id % TRACK_COLORS.length]
-          const trail = trails.get(t.id)
-          if (trail && trail.length > 1) {
-            ctx.strokeStyle = color
-            ctx.globalAlpha = 0.35
-            ctx.lineWidth = 1.5 * d
-            ctx.beginPath()
-            ctx.moveTo(sx(trail[0][0]), sy(trail[0][1]))
-            for (let i = 1; i < trail.length; i++) ctx.lineTo(sx(trail[i][0]), sy(trail[i][1]))
-            ctx.stroke()
-            ctx.globalAlpha = 1
-          }
-          const px = sx(t.x)
-          const py = sy(t.y)
-          ctx.beginPath()
-          ctx.arc(px, py, 5 * d, 0, Math.PI * 2)
-          ctx.fillStyle = color
-          ctx.fill()
-          ctx.lineWidth = 1.5 * d
-          ctx.strokeStyle = '#0b0e14'
-          ctx.stroke()
-          ctx.fillStyle = '#d7dce5'
-          ctx.font = `${11 * d}px ui-monospace, monospace`
-          ctx.fillText(`#${t.id}`, px + 8 * d, py - 6 * d)
-        }
+      const key = `${v.ox},${v.oy},${v.scale}`
+      if (!screenCache || screenCache.geometry !== geometry || screenCache.key !== key) {
+        screenCache = { geometry, key, points: geometry.map((item) => item.points.map(([x, y]) => [sx(x), sy(y)])) }
       }
-
-      // LiDAR origin.
-      ctx.fillStyle = '#ff5d5d'
-      ctx.beginPath()
-      ctx.arc(v.ox, v.oy, 4 * d, 0, Math.PI * 2)
-      ctx.fill()
+      const runtime = new Map(frame?.zones.map((zone) => [zone.id, zone]))
+      geometry.forEach(({ zone }, index) => {
+        const points = screenCache!.points[index]
+        if (points.length < 3) return
+        const active = runtime.get(zone.id)?.active ?? false
+        ctx.beginPath(); points.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath()
+        ctx.fillStyle = hexToRgba(zone.color, !zone.enabled ? 0.04 : active ? 0.3 : 0.12); ctx.fill()
+        ctx.strokeStyle = hexToRgba(zone.color, zone.enabled ? 0.9 : 0.4); ctx.lineWidth = (active ? 2 : 1.25) * d; ctx.stroke()
+        const center = points.reduce<Point>((sum, p) => [sum[0] + p[0] / points.length, sum[1] + p[1] / points.length], [0, 0])
+        ctx.textAlign = 'center'; ctx.fillStyle = '#d7dce5'
+        ctx.fillText(`${zone.name} · ${runtime.get(zone.id)?.occupants.length ?? 0}`, center[0], center[1]); ctx.textAlign = 'left'
+      })
+      for (const track of frame?.tracks ?? []) {
+        const color = PALETTE[track.id % PALETTE.length]
+        const trail = trails.get(track.id) ?? []
+        ctx.strokeStyle = color; ctx.globalAlpha = 0.35; ctx.lineWidth = 1.5 * d
+        ctx.beginPath(); trail.forEach(([x, y], i) => i ? ctx.lineTo(sx(x), sy(y)) : ctx.moveTo(sx(x), sy(y))); ctx.stroke()
+        ctx.globalAlpha = track.lostFrames ? 0.4 : 1
+        ctx.beginPath(); ctx.arc(sx(track.x), sy(track.y), 5 * d, 0, Math.PI * 2)
+        ctx.fillStyle = color; ctx.fill(); ctx.fillStyle = '#d7dce5'
+        ctx.fillText(`#${track.id}`, sx(track.x) + 8 * d, sy(track.y) - 6 * d); ctx.globalAlpha = 1
+      }
+      ctx.fillStyle = '#ff5d5d'; ctx.beginPath(); ctx.arc(v.ox, v.oy, 4 * d, 0, Math.PI * 2); ctx.fill()
     }
-    draw()
-
-    const onWheel = (e: WheelEvent): void => {
-      e.preventDefault()
-      const v = viewRef.current
-      const d = dpr()
-      const mx = e.offsetX * d
-      const my = e.offsetY * d
-      const k = Math.exp(-e.deltaY * 0.0015)
-      v.ox = mx - (mx - v.ox) * k
-      v.oy = my - (my - v.oy) * k
-      v.scale *= k
-      publishView()
+    const onWheel = (event: WheelEvent): void => {
+      event.preventDefault()
+      const v = viewRef.current; const rect = canvas.getBoundingClientRect()
+      const mx = (event.clientX - rect.left) * v.dpr; const my = (event.clientY - rect.top) * v.dpr
+      const nextScale = Math.min(3 * v.dpr, Math.max(0.002 * v.dpr, v.scale * Math.exp(-event.deltaY * 0.0015)))
+      const factor = nextScale / v.scale
+      v.ox = mx - (mx - v.ox) * factor; v.oy = my - (my - v.oy) * factor; v.scale = nextScale
+      publish()
     }
-    let dragging = false
-    let lx = 0
-    let ly = 0
-    const onDown = (e: MouseEvent): void => {
-      dragging = true
-      lx = e.clientX
-      ly = e.clientY
+    let drag: Point | null = null
+    const onDown = (event: PointerEvent): void => {
+      if (event.button !== 0) return
+      drag = [event.clientX, event.clientY]; canvas.setPointerCapture(event.pointerId)
       canvas.style.cursor = 'grabbing'
     }
-    const onMove = (e: MouseEvent): void => {
-      if (!dragging) return
+    const onMove = (event: PointerEvent): void => {
+      if (!drag) return
       const v = viewRef.current
-      const d = dpr()
-      v.ox += (e.clientX - lx) * d
-      v.oy += (e.clientY - ly) * d
-      lx = e.clientX
-      ly = e.clientY
-      publishView()
+      v.ox += (event.clientX - drag[0]) * v.dpr; v.oy += (event.clientY - drag[1]) * v.dpr
+      drag = [event.clientX, event.clientY]; publish()
     }
-    const onUp = (): void => {
-      if (!dragging) return
-      dragging = false
-      canvas.style.cursor = 'grab'
+    const onUp = (event: PointerEvent): void => {
+      drag = null; canvas.style.cursor = 'grab'
+      if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId)
     }
-
+    resize(); consume()
+    const ro = new ResizeObserver(resize); ro.observe(canvas)
+    const off = frameSource.subscribe(consume)
+    window.addEventListener('resize', resize)
     canvas.addEventListener('wheel', onWheel, { passive: false })
-    canvas.addEventListener('mousedown', onDown)
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-
+    canvas.addEventListener('pointerdown', onDown); canvas.addEventListener('pointermove', onMove)
+    canvas.addEventListener('pointerup', onUp); canvas.addEventListener('pointercancel', onUp)
     return () => {
-      cancelAnimationFrame(raf)
-      ro.disconnect()
-      canvas.removeEventListener('wheel', onWheel)
-      canvas.removeEventListener('mousedown', onDown)
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
+      cancelAnimationFrame(raf); ro.disconnect(); off()
+      scheduleRef.current = () => {}; fitRef.current = () => {}
+      window.removeEventListener('resize', resize)
+      canvas.removeEventListener('wheel', onWheel); canvas.removeEventListener('pointerdown', onDown)
+      canvas.removeEventListener('pointermove', onMove); canvas.removeEventListener('pointerup', onUp)
+      canvas.removeEventListener('pointercancel', onUp)
     }
-  }, [])
-
-  return (
-    <>
-      <canvas
-        ref={canvasRef}
-        style={{ width: '100%', height: '100%', display: 'block', cursor: 'grab' }}
-      />
-      <div className="hud">
-        <div>
-          <span className="accent">{hz.toFixed(1)}</span> Hz
-        </div>
-        <div>{pts} pts</div>
-        <div>#{seq}</div>
-        <div style={{ color: '#5b6678' }}>scroll = zoom · drag = pan</div>
-      </div>
-    </>
-  )
+  }, [frameSource])
+  useEffect(() => scheduleRef.current(), [config, calibration, projected, homographyInv])
+  return <>
+    <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block', cursor: 'grab', touchAction: 'none' }} />
+    <button className="view-fit" onClick={() => fitRef.current()}>Fit view</button>
+  </>
 }
+export default memo(LidarCanvas)

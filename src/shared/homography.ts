@@ -36,7 +36,8 @@ const isFiniteNum = (n: number): boolean => typeof n === 'number' && Number.isFi
  * Compute the 3x3 homography mapping the 4 source LiDAR-mm points to the
  * unit-square corners (0,0), (1,0), (1,1), (0,1).
  *
- * Solves the standard 8x8 DLT linear system (h33 fixed to 1) via Gaussian
+ * Solves the standard 8x8 DLT linear system (h33 fixed to 1 in centered,
+ * scaled source coordinates) via Gaussian
  * elimination with partial pivoting. For each correspondence (x, y) -> (u, v):
  *   u = (h0·x + h1·y + h2) / (h6·x + h7·y + 1)
  *   v = (h3·x + h4·y + h5) / (h6·x + h7·y + 1)
@@ -59,12 +60,20 @@ export function computeHomography(src: CalibrationPoints['src']): Mat3 {
     }
   }
 
+  // Normalize around an interior point. Besides improving conditioning, this
+  // allows maps whose denominator is zero at the sensor origin (h33 = 0 in
+  // millimeter coordinates), which a raw h33=1 solve cannot represent.
+  const centerX = src.reduce((sum, p) => sum + p[0] / 4, 0)
+  const centerY = src.reduce((sum, p) => sum + p[1] / 4, 0)
+  const scale = Math.max(...src.map((p) => Math.hypot(p[0] - centerX, p[1] - centerY)))
+  if (!(scale > 0) || !Number.isFinite(scale)) return identity()
+
   // Build the 8x8 system A·h = b, with unknowns h = [h0..h7] and h8 = 1.
   const A: number[][] = []
   const b: number[] = []
   for (let i = 0; i < 4; i++) {
-    const x = src[i][0]
-    const y = src[i][1]
+    const x = (src[i][0] - centerX) / scale
+    const y = (src[i][1] - centerY) / scale
     const u = DST[i][0]
     const v = DST[i][1]
     A.push([x, y, 1, 0, 0, 0, -x * u, -y * u])
@@ -79,7 +88,12 @@ export function computeHomography(src: CalibrationPoints['src']): Mat3 {
     return identity()
   }
 
-  const H: Mat3 = [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1]
+  // Compose the solved map with the source normalization.
+  const H: Mat3 = [
+    h[0] / scale, h[1] / scale, h[2] - (h[0] * centerX + h[1] * centerY) / scale,
+    h[3] / scale, h[4] / scale, h[5] - (h[3] * centerX + h[4] * centerY) / scale,
+    h[6] / scale, h[7] / scale, 1 - (h[6] * centerX + h[7] * centerY) / scale
+  ]
   for (const m of H) {
     if (!isFiniteNum(m)) {
       console.warn('[homography] computeHomography: non-finite solution; using identity')
@@ -90,9 +104,70 @@ export function computeHomography(src: CalibrationPoints['src']): Mat3 {
 }
 
 /**
+ * Validate a calibration quad before trusting it for touch output. Returns
+ * null when usable, else a short reason. Rejects non-finite / duplicate
+ * points, a self-intersecting or non-convex ring, and a near-zero area
+ * (< 100 cm^2), all of which make the homography singular or fold space.
+ */
+export function validateQuad(src: CalibrationPoints['src'] | null | undefined): string | null {
+  if (!src || src.length !== 4) return 'need 4 points'
+  for (const p of src) {
+    if (!p || p.length !== 2 || !isFiniteNum(p[0]) || !isFiniteNum(p[1])) return 'non-finite point'
+  }
+  for (let i = 0; i < 4; i++) {
+    for (let j = i + 1; j < 4; j++) {
+      if (Math.hypot(src[i][0] - src[j][0], src[i][1] - src[j][1]) < 50) return 'points too close'
+    }
+  }
+  // Convex + consistently wound: every consecutive edge turns the same way.
+  let sign = 0
+  for (let i = 0; i < 4; i++) {
+    const a = src[i]
+    const b = src[(i + 1) % 4]
+    const c = src[(i + 2) % 4]
+    const cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])
+    if (Math.abs(cross) < 1e-6) return 'collinear points'
+    const sgn = cross > 0 ? 1 : -1
+    if (sign === 0) sign = sgn
+    else if (sgn !== sign) return 'quad is not convex (check corner order TL, TR, BR, BL)'
+  }
+  let area2 = 0
+  for (let i = 0; i < 4; i++) {
+    const a = src[i]
+    const b = src[(i + 1) % 4]
+    area2 += a[0] * b[1] - b[0] * a[1]
+  }
+  if (Math.abs(area2) / 2 < 10000) return 'area too small'
+  return null
+}
+
+/**
+ * Strict variant for the live pipeline: returns null instead of an identity
+ * fallback when the quad is invalid, so raw millimeters are never mistaken
+ * for normalized coordinates.
+ */
+export function computeHomographyChecked(src: CalibrationPoints['src'] | null | undefined): Mat3 | null {
+  if (validateQuad(src) !== null) return null
+  let H = computeHomography(src as CalibrationPoints['src'])
+  // Scale-normalize so w > 0 across the quad (H and -H are the same map);
+  // applyHomographyStrict then rejects points beyond the horizon via w <= 0.
+  const w0 = H[6] * src![0][0] + H[7] * src![0][1] + H[8]
+  if (w0 < 0) H = H.map((m) => -m)
+  // computeHomography only falls back to identity on failure; a valid convex
+  // quad never maps to identity unless it literally is the unit square in mm.
+  for (let i = 0; i < 4; i++) {
+    const [u, v] = applyHomographyStrict(H, src![i][0], src![i][1])
+    const [eu, ev] = DST[i]
+    if (!isFiniteNum(u) || !isFiniteNum(v) || Math.abs(u - eu) > 1e-6 || Math.abs(v - ev) > 1e-6) return null
+  }
+  return H
+}
+
+/**
  * Apply a homography to a point: perspective transform with divide by w.
  * Returns the mapped [u, v]. If w is ~0 (point on the line at infinity for
- * this map) the raw numerators are returned unscaled to avoid NaN/Infinity.
+ * this map) the raw numerators are returned unscaled to avoid NaN/Infinity;
+ * use applyHomographyStrict where such points must be rejected.
  */
 export function applyHomography(H: Mat3, x: number, y: number): [number, number] {
   const u = H[0] * x + H[1] * y + H[2]
@@ -195,4 +270,11 @@ function solve8(Ain: number[][], bin: number[]): number[] | null {
   const x = new Array<number>(n)
   for (let r = 0; r < n; r++) x[r] = M[r][n] / M[r][r]
   return x
+}
+
+/** Like applyHomography but returns NaNs when w ~ 0 or w < 0 (point behind the map's horizon). */
+export function applyHomographyStrict(H: Mat3, x: number, y: number): [number, number] {
+  const w = H[6] * x + H[7] * y + H[8]
+  if (!(w > 1e-12)) return [NaN, NaN]
+  return [(H[0] * x + H[1] * y + H[2]) / w, (H[3] * x + H[4] * y + H[5]) / w]
 }

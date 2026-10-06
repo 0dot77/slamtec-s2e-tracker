@@ -9,7 +9,8 @@ const EXIT_REASONS: Record<number, string> = {
   2: 'driver init failed',
   3: 'connect failed',
   4: 'no response from device',
-  5: 'device health error'
+  5: 'device health error',
+  6: 'start scan failed'
 }
 
 export interface RawScan {
@@ -23,20 +24,30 @@ export interface RawScan {
 
 /**
  * Spawns the C++ s2e_bridge process and parses its binary frame stream.
- * Emits: 'scan' (RawScan), 'status' (BridgeStatus-like), 'log' (string).
+ * Emits: 'scan' (RawScan), 'status' (BridgeStatus-like), 'log' (string),
+ * 'exit' (code).
+ *
+ * Shutdown is graceful first: closing the child's stdin tells the bridge to
+ * stop the motor and exit (it also exits by itself if this process dies), and
+ * a hard kill follows only if it has not exited within `killGraceMs`.
  */
 export class Bridge extends EventEmitter {
   private child?: ChildProcessWithoutNullStreams
+  private drainingChild?: ChildProcessWithoutNullStreams
   private buf: Buffer = Buffer.alloc(0)
+  private errBuf = ''
 
-  // Reconnect state. `stopping` distinguishes an explicit stop()/restart from an
-  // unexpected exit (sensor unplugged, bridge crash) so only the latter triggers
-  // an automatic respawn with the last-used target.
+  // `stopping` distinguishes an explicit stop()/restart from an unexpected exit
+  // (sensor unplugged, bridge crash) so only the latter triggers a respawn.
   private stopping = false
   private reconnectTimer?: ReturnType<typeof setTimeout>
+  private killTimer?: ReturnType<typeof setTimeout>
+  // Target to spawn once the previous child has exited (restart).
+  private pending: { ip: string; port: number } | null = null
   private ip = '192.168.11.2'
   private port = 8089
   private readonly reconnectDelayMs = 1500
+  private readonly killGraceMs = 1500
 
   constructor(private readonly bridgePath: string) {
     super()
@@ -47,19 +58,40 @@ export class Bridge extends EventEmitter {
     this.port = port
     this.stopping = false
     this.clearReconnect()
-    // Restart: kill any running child. Its exit is ignored because spawn()
-    // installs a replacement synchronously (the exit handler checks identity).
-    if (this.child) this.child.kill('SIGTERM')
+    if (this.child) {
+      // Restart: let the old child release the sensor before spawning anew.
+      this.pending = { ip, port }
+      this.shutdownChild()
+      return
+    }
     this.spawn()
   }
 
   stop(): void {
     this.stopping = true
+    this.pending = null
     this.clearReconnect()
     if (this.child) {
-      this.child.kill('SIGTERM') // exit handler emits the 'stopped' status
+      this.shutdownChild() // exit handler emits the 'stopped' status
     } else {
       this.emit('status', { state: 'stopped', message: 'stopped' })
+    }
+  }
+
+  /** Synchronous hard kill for app quit (no time to wait for a graceful exit). */
+  kill(): void {
+    this.stopping = true
+    this.pending = null
+    this.clearReconnect()
+    if (this.killTimer) {
+      clearTimeout(this.killTimer)
+      this.killTimer = undefined
+    }
+    this.drainingChild = this.child
+    try {
+      this.child?.kill()
+    } catch {
+      /* already gone */
     }
   }
 
@@ -67,50 +99,110 @@ export class Bridge extends EventEmitter {
     return !!this.child
   }
 
+  private shutdownChild(): void {
+    const child = this.child
+    if (!child) return
+    this.drainingChild = child
+    try {
+      child.stdin.end()
+    } catch {
+      /* pipe already closed */
+    }
+    if (this.killTimer) clearTimeout(this.killTimer)
+    this.killTimer = setTimeout(() => {
+      this.killTimer = undefined
+      if (this.child === child) {
+        try {
+          child.kill()
+        } catch {
+          /* already gone */
+        }
+      }
+    }, this.killGraceMs)
+  }
+
   private spawn(): void {
     this.buf = Buffer.alloc(0)
+    this.errBuf = ''
     this.emit('status', { state: 'connecting', message: `${this.ip}:${this.port}` })
 
-    const child = spawn(this.bridgePath, [this.ip, String(this.port)])
+    let child: ChildProcessWithoutNullStreams
+    try {
+      child = spawn(this.bridgePath, [this.ip, String(this.port)], { windowsHide: true })
+    } catch (err) {
+      this.emit('status', { state: 'error', message: `spawn failed: ${(err as Error).message}` })
+      this.scheduleReconnect()
+      return
+    }
     this.child = child
 
-    child.stdout.on('data', (c: Buffer) => this.onData(c))
-    child.stderr.on('data', (c: Buffer) => this.onStderr(c.toString()))
-    child.on('error', (err) =>
-      this.emit('status', { state: 'error', message: `spawn failed: ${err.message}` })
-    )
-    child.on('exit', (code, signal) => {
-      if (this.child !== child) return // superseded by a newer spawn: ignore
+    // Every handler checks identity: a superseded child's late output or exit
+    // must never reach the current parser/state.
+    child.stdout.on('data', (c: Buffer) => {
+      if (this.child === child && this.drainingChild !== child) this.onData(c)
+    })
+    child.stderr.on('data', (c: Buffer) => {
+      if (this.child === child && this.drainingChild !== child) this.onStderr(c.toString())
+    })
+    child.stdin.on('error', () => {
+      /* EPIPE when the child exits first: ignore */
+    })
+
+    let finished = false
+    const finish = (code: number | null, signal: NodeJS.Signals | null, spawnError?: Error): void => {
+      if (finished) return
+      finished = true
+      if (this.child !== child) return
+      const intentional = this.drainingChild === child
+      if (intentional) this.drainingChild = undefined
       this.child = undefined
-      // Surface the raw exit code so the integrator can re-diagnose the network
-      // and distinguish an adapter loss from an unresponsive device.
-      this.emit('exit', code)
+      if (this.killTimer) {
+        clearTimeout(this.killTimer)
+        this.killTimer = undefined
+      }
+      // A replaced child's exit must not be interpreted as failure of the new
+      // target (or trigger exit diagnosis after its preflight has completed).
+      if (!intentional) this.emit('exit', code)
+
+      if (this.pending) {
+        const next = this.pending
+        this.pending = null
+        this.ip = next.ip
+        this.port = next.port
+        this.spawn()
+        return
+      }
       if (this.stopping) {
         this.emit('status', { state: 'stopped', message: `exited (${code ?? signal})` })
         return
       }
-      // Map the bridge's explicit exit codes to human-readable errors before the
-      // reconnect status. These mirror bridge/src/main.cpp: 2=driver init,
-      // 3=connect, 4=no response, 5=device health.
+      if (spawnError) {
+        this.emit('status', { state: 'error', message: `spawn failed: ${spawnError.message}` })
+        // A missing binary will not appear by retrying every 1.5 s.
+        if ((spawnError as NodeJS.ErrnoException).code === 'ENOENT') return
+        this.scheduleReconnect(5000)
+        return
+      }
       const reason = EXIT_REASONS[code ?? -1]
       if (reason) this.emit('status', { state: 'error', message: reason })
       // Driver initialization failures are terminal because reconnecting cannot heal them.
       if (code === 2) return
-      // Unexpected exit (disconnect / crash): auto-reconnect after a short delay.
       this.emit('status', {
         state: 'connecting',
         message: `connection lost (${code ?? signal}); reconnecting in ${this.reconnectDelayMs}ms…`
       })
       this.scheduleReconnect()
-    })
+    }
+    child.on('error', (err) => finish(null, null, err))
+    child.on('exit', (code, signal) => finish(code, signal))
   }
 
-  private scheduleReconnect(): void {
+  private scheduleReconnect(delay = this.reconnectDelayMs): void {
     this.clearReconnect()
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined
-      if (!this.stopping) this.spawn()
-    }, this.reconnectDelayMs)
+      if (!this.stopping && !this.child) this.spawn()
+    }, delay)
   }
 
   private clearReconnect(): void {
@@ -121,7 +213,12 @@ export class Bridge extends EventEmitter {
   }
 
   private onStderr(text: string): void {
-    for (const raw of text.split('\n')) {
+    // Keep a partial trailing line until its newline arrives.
+    this.errBuf += text
+    if (this.errBuf.length > 64 * 1024) this.errBuf = this.errBuf.slice(-4096)
+    const lines = this.errBuf.split('\n')
+    this.errBuf = lines.pop() ?? ''
+    for (const raw of lines) {
       const line = raw.trim()
       if (!line) continue
       const lower = line.toLowerCase()
@@ -158,16 +255,32 @@ export class Bridge extends EventEmitter {
       const dist = new Float32Array(count)
       const quality = new Uint8Array(count)
       let p = off + HEADER_BYTES
+      let m = 0
       for (let i = 0; i < count; i++) {
-        angle[i] = buf.readFloatLE(p)
-        dist[i] = buf.readFloatLE(p + 4)
-        quality[i] = buf[p + 8]
+        const a = buf.readFloatLE(p)
+        const d = buf.readFloatLE(p + 4)
+        // Drop corrupt points instead of letting NaN/huge values into the pipeline.
+        if (a >= 0 && a <= 360 && d > 0 && d < 100000) {
+          angle[m] = a
+          dist[m] = d
+          quality[m] = buf[p + 8]
+          m++
+        }
         p += POINT_BYTES
       }
-      this.emit('scan', { seq, tMs, count, angle, dist, quality } satisfies RawScan)
+      this.emit('scan', {
+        seq,
+        tMs,
+        count: m,
+        angle: m === count ? angle : angle.subarray(0, m),
+        dist: m === count ? dist : dist.subarray(0, m),
+        quality: m === count ? quality : quality.subarray(0, m)
+      } satisfies RawScan)
       off += need
     }
 
     this.buf = off > 0 ? buf.subarray(off) : buf
+    // A stream that never resyncs must not grow without bound.
+    if (this.buf.length > HEADER_BYTES + MAX_POINTS * POINT_BYTES * 2) this.buf = Buffer.alloc(0)
   }
 }

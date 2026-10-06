@@ -25,10 +25,23 @@
 #include <cstring>
 #include <csignal>
 #include <chrono>
+#include <cerrno>
+#include <thread>
+#include <atomic>
 
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #include <fcntl.h>
 #include <io.h>
+#include <process.h>
+#else
+#include <unistd.h>
 #endif
 
 #include "sl_lidar.h"
@@ -43,10 +56,49 @@ using namespace sl;
 static const uint32_t FRAME_MAGIC = 0x534C4944u; // 'SLID'
 static const size_t   MAX_NODES   = 8192;
 
-static volatile sig_atomic_t g_stop = 0;
-static void on_signal(int) { g_stop = 1; }
+// The stop flag is also written by the stdin watchdog. Lock-free atomics keep
+// the signal handler safe without volatile's inter-thread data race.
+static_assert(ATOMIC_BOOL_LOCK_FREE == 2, "stop flag must be lock-free");
+static std::atomic<bool> g_stop(false);
+static std::atomic<bool> g_main_exited(false);
+static void on_signal(int) { g_stop.store(true, std::memory_order_relaxed); }
+
+struct MainExitFlag {
+    ~MainExitFlag() { g_main_exited.store(true); }
+};
+
+static void watch_parent() {
+    // Electron leaves stdin open and never writes. Use the raw descriptor so
+    // a blocking stdio read cannot hold stdin's lock during CRT shutdown.
+    // On Windows, ReadFile also avoids _read's CRT descriptor lock, which
+    // closing stdin during normal process shutdown would otherwise need.
+    char byte;
+#ifdef _WIN32
+    const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+#endif
+    for (;;) {
+#ifdef _WIN32
+        DWORD n = 0;
+        if (!ReadFile(input, &byte, 1, &n, nullptr)) break;
+#else
+        const ssize_t n = read(STDIN_FILENO, &byte, 1);
+        if (n < 0 && errno == EINTR) continue;
+#endif
+        if (n > 0) continue;
+        break; // EOF or error: parent closed its pipe or died.
+    }
+    g_stop.store(true);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!g_main_exited.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    // SDK cleanup or a stdout write may still be blocked. _exit bypasses those
+    // waits, including during the initial connect/device-info handshake.
+    if (!g_main_exited.load()) _exit(0);
+}
 
 int main(int argc, const char **argv) {
+    MainExitFlag main_exit;
     const char *ip   = (argc > 1) ? argv[1] : "192.168.11.2";
     int         port = (argc > 2) ? atoi(argv[2]) : 8089;
 
@@ -66,6 +118,7 @@ int main(int argc, const char **argv) {
     // stderr unbuffered so connection logs appear immediately; stdout carries
     // binary frames that we flush explicitly after each scan.
     setvbuf(stderr, nullptr, _IONBF, 0);
+    std::thread(watch_parent).detach();
     fprintf(stderr, "[bridge] SDK %s, connecting UDP %s:%d\n", SL_LIDAR_SDK_VERSION, ip, port);
 
     ILidarDriver *drv = *createLidarDriver();
@@ -82,7 +135,7 @@ int main(int argc, const char **argv) {
     if (SL_IS_FAIL(drv->getDeviceInfo(info))) {
         // UDP connect() succeeds even with no device present; this is the first
         // real request/response, so a failure here means nothing is answering.
-        fprintf(stderr, "[bridge] getDeviceInfo failed - no response from %s:%d (check adapter IP 192.168.11.100/24 and link: arp -an)\n", ip, port);
+        fprintf(stderr, "[bridge] getDeviceInfo failed - no response from %s:%d (check adapter IP on the sensor's /24 and link: arp -an)\n", ip, port);
         delete drv;
         return 4;
     }
@@ -108,29 +161,41 @@ int main(int argc, const char **argv) {
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
-    drv->startScan(0, 1); // force=0, useTypicalScan=1
-    fprintf(stderr, "[bridge] scanning\n");
+    LidarScanMode scan_mode = {};
+    const sl_result scan_result = drv->startScan(false, true, 0, &scan_mode);
+    if (SL_IS_FAIL(scan_result)) {
+        fprintf(stderr, "[bridge] startScan failed (0x%08X)\n", (unsigned)scan_result);
+        delete drv;
+        return 6;
+    }
+    fprintf(stderr, "[bridge] scanning typical mode id=%u name=%.64s us/sample=%.2f max_distance=%.2f\n",
+            (unsigned)scan_mode.id, scan_mode.scan_mode,
+            (double)scan_mode.us_per_sample, (double)scan_mode.max_distance);
 
     const auto t0 = std::chrono::steady_clock::now();
     uint32_t seq = 0;
     sl_lidar_response_measurement_node_hq_t nodes[MAX_NODES];
     static uint8_t framebuf[16 + MAX_NODES * 9];
     int consecutive_failures = 0;
+    bool received_frame = false;
+    int exit_code = 0;
 
-    while (!g_stop) {
+    while (!g_stop.load()) {
         size_t count = _countof(nodes);
-        sl_result op = drv->grabScanDataHq(nodes, count);
-        if (SL_IS_FAIL(op)) {
-            if (g_stop) continue;
-            if (++consecutive_failures >= 5) {
+        sl_result op = drv->grabScanDataHq(nodes, count, 1000);
+        if (SL_IS_FAIL(op) || count == 0 || count > MAX_NODES) {
+            if (g_stop.load()) break;
+            const bool startup_expired = std::chrono::steady_clock::now() - t0 >= std::chrono::seconds(8);
+            if ((!received_frame && startup_expired) ||
+                (received_frame && ++consecutive_failures >= 3)) {
                 fprintf(stderr, "[bridge] scan stalled - no data from device, exiting\n");
-                drv->stop();
-                delete drv;
-                return 4;
+                exit_code = 4;
+                break;
             }
             continue;
         }
         consecutive_failures = 0;
+        received_frame = true;
         drv->ascendScanData(nodes, count);
 
         const uint32_t t_ms = (uint32_t)std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -143,7 +208,7 @@ int main(int argc, const char **argv) {
             float dist = nodes[i].dist_mm_q2 / 4.0f;
             if (dist <= 0.0f) continue; // drop no-return / invalid points
             float angle = (nodes[i].angle_z_q14 * 90.0f) / 16384.0f;
-            uint8_t q   = (uint8_t)(nodes[i].quality >> SL_LIDAR_RESP_MEASUREMENT_QUALITY_SHIFT);
+            uint8_t q   = nodes[i].quality; // HQ quality is already an 8-bit value.
             memcpy(framebuf + off, &angle, 4); off += 4;
             memcpy(framebuf + off, &dist,  4); off += 4;
             framebuf[off++] = q;
@@ -156,11 +221,11 @@ int main(int argc, const char **argv) {
         ++seq;
 
         if (fwrite(framebuf, off, 1, stdout) != 1) break; // parent gone
-        fflush(stdout);
+        if (fflush(stdout) != 0) break; // buffered write failed: parent gone
     }
 
     fprintf(stderr, "[bridge] stopping\n");
     drv->stop();
     delete drv;
-    return 0;
+    return exit_code;
 }

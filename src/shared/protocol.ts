@@ -5,5 +5,6 @@
 export const FRAME_MAGIC = 0x534c4944 // 'SLID'
 export const HEADER_BYTES = 16
 export const POINT_BYTES = 9
-// Sanity cap used to detect stream desync (a real S2 scan is ~2k-3.5k points).
-export const MAX_POINTS = 20000
+// Sanity cap used to detect stream desync; equals the bridge's MAX_NODES
+// (a real S2 scan is ~2k-3.5k points).
+export const MAX_POINTS = 8192
