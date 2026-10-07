@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { BridgeStatus, CalibrationPoints, OscConfig, PipelineConfig, Preset, VizFrame, Zone } from '@shared/types'
 import { DEFAULT_OSC_CONFIG, DEFAULT_PIPELINE_CONFIG } from '@shared/types'
 import { applyHomography, applyHomographyStrict, computeHomographyChecked, invertMat3, validateQuad } from '@shared/homography'
-import LidarCanvas, { type View } from './components/LidarCanvas'
+import LidarCanvas from './components/LidarCanvas'
 import CalibrationLayer from './components/CalibrationLayer'
 import ZoneOverlay from './components/ZoneOverlay'
 import ZoneEditor from './components/ZoneEditor'
@@ -12,6 +12,7 @@ import NetworkFixPanel from './components/NetworkFixPanel'
 import { createFrameStore } from './lib/frameStore'
 import { useFrameHud } from './lib/useFrameHud'
 import { clampZonePolygon, seedZoneNames } from './lib/zones'
+import { loadViewOrientation, saveViewOrientation, toScreen as projectToScreen, toWorld as projectToWorld, type View } from './lib/viewTransform'
 
 const STATE_COLOR: Record<string, string> = {
   idle: '#8a93a6', connecting: '#e0b341', connected: '#37a0d4', scanning: '#3ad48c',
@@ -39,6 +40,8 @@ export default function App(): JSX.Element {
   const hydratedRef = useRef(false)
   const [error, setError] = useState('')
   const [view, setView] = useState<View | null>(null)
+  const [orientation, setOrientation] = useState(loadViewOrientation)
+  useEffect(() => saveViewOrientation(orientation), [orientation])
   const lastEventRef = useRef('')
   const [frames] = useState(createFrameStore)
   const latestFrameRef = useRef<VizFrame | null>(null)
@@ -147,11 +150,11 @@ export default function App(): JSX.Element {
   viewRef.current = view
   const toScreen = useCallback((x: number, y: number): [number, number] => {
     const current = viewRef.current
-    return current ? [(current.ox + x * current.scale) / current.dpr, (current.oy - y * current.scale) / current.dpr] : [0, 0]
+    return current ? projectToScreen(current, x, y) : [0, 0]
   }, [view])
   const toWorld = useCallback((x: number, y: number): [number, number] => {
     const current = viewRef.current
-    return current ? [(x * current.dpr - current.ox) / current.scale, (current.oy - y * current.dpr) / current.scale] : [0, 0]
+    return current ? projectToWorld(current, x, y) : [0, 0]
   }, [view])
   const homography = useMemo(() => computeHomographyChecked(calibration?.src), [calibration])
   const inverse = useMemo(() => homography ? invertMat3(homography) : null, [homography])
@@ -228,15 +231,17 @@ export default function App(): JSX.Element {
           <span className={`view-status${hud.stale ? ' stale' : ''}`}>{hud.stale ? 'stale · ' : ''}{hud.hz.toFixed(1)} Hz · {hud.procMs.toFixed(1)} ms · {hud.count} pts · #{hud.seq ?? '—'}</span>
         </div>
         <div className="canvas-wrap">
-          {mainView === 'lidar' ? <>
-            <LidarCanvas frameSource={frames} calibration={calibration} config={pipe} zones={zones} homographyInv={inverse} onView={setView} />
-            <div className="hud"><span className="muted">scroll = zoom · drag = pan · shaded = excluded</span></div>
+          {mainView === 'lidar' ? <LidarCanvas frameSource={frames} calibration={calibration}
+            fitCalibration={mode === 'calibrate' ? draft ?? calibration : calibration}
+            config={pipe} zones={zones} homographyInv={inverse} onView={setView}
+            orientation={orientation} onOrientation={setOrientation}>
+            <div className="hud"><span className="muted">scroll = zoom · drag = pan · right-drag = rotate · shaded = excluded</span></div>
             {mode === 'calibrate' && draft && view && <CalibrationLayer points={draft} onChange={setDraft}
               onApply={applyCalibration} onCancel={() => { setDraft(null); setMode('view') }} frameSource={frames}
               toScreen={toScreen} toWorld={toWorld} width={view.cssW} height={view.cssH} />}
             {mode === 'zones' && view && <ZoneOverlay width={view.cssW} height={view.cssH} zones={zones} runtime={hud.zones}
               calibrated={!!homography} normToScreen={normToScreen} screenToNorm={screenToNorm} onChange={handleZones} />}
-          </> : <WallView frameSource={frames} zones={zones} runtime={hud.zones} onChange={handleZones}
+          </LidarCanvas> : <WallView frameSource={frames} zones={zones} runtime={hud.zones} onChange={handleZones}
             editing={mode === 'zones' && hydrated} calibrated={!!homography} />}
         </div>
       </div>

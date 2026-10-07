@@ -408,8 +408,8 @@ button:disabled { opacity: 0.5; cursor: default !important; }
 .ready-badge.ready { border-color: #277552; color: #3ad48c; }
 .control-metrics { display: flex; justify-content: space-between; color: #9fb0c8; font: 11px ui-monospace, monospace; margin-top: 8px; }
 .control-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-.control-panel button, .zone-toolbar button, .view-fit { background: #2563a8; border: 1px solid #2f74c0; color: #fff; border-radius: 6px; padding: 6px 9px; font-size: 11px; cursor: pointer; }
-.control-panel button.ghost, .zone-toolbar button.ghost, .view-fit { background: #1c2436; border-color: #2a3344; color: #d7dce5; }
+.control-panel button, .zone-toolbar button { background: #2563a8; border: 1px solid #2f74c0; color: #fff; border-radius: 6px; padding: 6px 9px; font-size: 11px; cursor: pointer; }
+.control-panel button.ghost, .zone-toolbar button.ghost { background: #1c2436; border-color: #2a3344; color: #d7dce5; }
 .control-panel details { padding: 8px 0; border-top: 1px solid #1e2533; }
 .control-panel summary { color: #9fb0c8; cursor: pointer; margin-bottom: 10px; }
 .control-numeric { display: flex; gap: 8px; align-items: center; justify-content: space-between; margin: 7px 0; color: #8a93a6; }
@@ -421,7 +421,17 @@ button:disabled { opacity: 0.5; cursor: default !important; }
 .control-check { display: flex; gap: 6px; align-items: center; font-size: 11px; }
 input[type=checkbox] { accent-color: #3ad48c; }
 .input-error { color: #ff8b8b; font-size: 11px; }
-.view-fit { position: absolute; right: 12px; bottom: 12px; }
+.lidar-stage { height: 100%; display: flex; flex-direction: column; min-height: 0; }
+.lidar-surface { position: relative; flex: 1; min-height: 0; overflow: hidden; touch-action: none; }
+.lidar-view-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 10px; background: #11151f; border-bottom: 1px solid #1e2533; }
+.lidar-view-tools button, .lidar-view-tools select { background: #1c2436; border: 1px solid #2a3344; color: #d7dce5; border-radius: 6px; padding: 5px 7px; font-size: 11px; cursor: pointer; }
+.lidar-view-tools button:hover { filter: brightness(1.15); }
+.lidar-view-tools button[aria-pressed=true] { background: #203c4b; border-color: #37a0d4; color: #8fddd6; }
+.view-rotation-buttons, .view-align-controls { display: flex; gap: 3px; }
+.view-rotation-input { display: flex; align-items: center; gap: 3px; color: #9fb0c8; font: 11px ui-monospace, monospace; }
+.view-rotation-input input { width: 66px; min-width: 0; background: #0b0e14; border: 1px solid #2a3344; color: #d7dce5; border-radius: 5px; padding: 4px; font: inherit; }
+.view-rotation-input input:focus { outline: none; border-color: #37a0d4; }
+.view-compass { display: flex; align-items: center; gap: 3px; margin-left: auto; color: #9fb0c8; font: 11px ui-monospace, monospace; white-space: nowrap; }
 .zone-overlay { position: absolute; top: 0; left: 0; pointer-events: none; overflow: hidden; }
 .zone-toolbar { position: absolute; left: 12px; right: 12px; bottom: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 7px; background: rgba(11,14,20,0.94); border: 1px solid #2a3344; border-radius: 8px; font-size: 11px; }
 .zone-editor { font-size: 12px; }
